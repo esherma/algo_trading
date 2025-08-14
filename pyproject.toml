@@ -1,0 +1,18 @@
+[project]
+name = "algo-trading"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "alpaca-py>=0.40.1",
+    "python-dotenv>=1.0.1",
+    "pandas>=2.2.2",
+    "numpy>=1.26.4",
+    "pytz>=2024.1",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=6.29.5",
+]
