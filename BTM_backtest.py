@@ -449,7 +449,7 @@ def backtest_strategy(
 # ============================
 
 def run_backtests(cfg: Optional[BacktestConfig] = None) -> None:
-    cfg = cfg or BacktestConfig(start='2024-01-01')
+    cfg = cfg or BacktestConfig(symbol='TQQQ',start='2025-01-01')
     load_env()
     client = get_alpaca_client(cfg.session)
 
