@@ -7,6 +7,8 @@ from typing import List, Optional, Tuple, Literal
 import numpy as np
 import pandas as pd
 import pytz
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 from dotenv import load_dotenv
 
 # Alpaca SDK
@@ -26,7 +28,7 @@ SessionType = Literal["paper", "live"]
 class BacktestConfig:
     symbol: str = "SPY"
     timezone: str = "America/New_York"
-    start: str = "2020-01-01"
+    start: str = "2018-01-01"
     end: Optional[str] = None  # inclusive end date in YYYY-MM-DD, None = today
     lookback_days: int = 14
     volatility_multiplier: float = 1.0
@@ -95,12 +97,18 @@ def fetch_intraday_bars(
     start: str,
     end: Optional[str],
 ) -> pd.DataFrame:
+    # Convert start/end dates to UTC, ensuring we get full trading days
+    # Market opens at 09:30 EST/EDT, which is 14:30 UTC (EST) or 13:30 UTC (EDT)
+    # We'll fetch from 00:00 UTC to ensure we get the full day
+    start_dt = pd.Timestamp(start, tz=pytz.UTC)
     end_arg = end if end is not None else pd.Timestamp.today(tz=pytz.UTC).strftime("%Y-%m-%d")
+    end_dt = pd.Timestamp(end_arg, tz=pytz.UTC)
+    
     req = StockBarsRequest(
         symbol_or_symbols=symbol,
         timeframe=TimeFrame.Minute,
-        start=pd.Timestamp(start, tz=pytz.UTC),
-        end=pd.Timestamp(end_arg, tz=pytz.UTC),
+        start=start_dt,
+        end=end_dt,
         adjustment="raw",
     )
     bars = client.get_stock_bars(req)
@@ -130,7 +138,9 @@ def fetch_intraday_bars(
     df.index = ensure_ny_tz(df.index, "America/New_York")
 
     # Filter to regular market hours 09:30 - 16:00 ET
-    df = df[(df.index.strftime("%H:%M") >= "09:30") & (df.index.strftime("%H:%M") <= "16:00")]
+    # Use time() method to get time components for more reliable filtering
+    df = df[(df.index.time >= pd.Timestamp("09:30").time()) & 
+            (df.index.time <= pd.Timestamp("16:00").time())]
 
     return df[["open", "high", "low", "close", "volume", "vwap"]].copy()
 
@@ -208,7 +218,7 @@ def compute_noise_bands(
         lower_base = np.minimum(open_ref, close_prev_ref)
     else:
         upper_base = open_ref
-        lower_base = open_ref
+        lower_base = open_ref 
 
     upper = upper_base * (1.0 + sigma.values)
     lower = lower_base * (1.0 - sigma.values)
@@ -304,6 +314,95 @@ def generate_positions(
     out["position"] = position
     out["VWAP"] = vwap
     return out
+
+
+# ============================
+# Trade Analysis
+# ============================
+
+def calculate_trade_metrics(
+    df: pd.DataFrame,
+    pos: pd.DataFrame,
+    signed_shares_series: pd.Series,
+    pnl_net_series: pd.Series,
+    cfg: BacktestConfig,
+) -> dict:
+    """
+    Calculate trade-level metrics including hit ratio, number of trades, etc.
+    """
+    # Identify trades by looking at position changes
+    position_changes = pos["position"].diff().fillna(0)
+    
+    # Group trades by day and calculate trade-level PnL
+    trades = []
+    current_trade_pnl = 0.0
+    current_trade_start = None
+    current_position = 0
+    
+    for i, (ts, pos_val) in enumerate(pos["position"].items()):
+        pos_change = position_changes.iloc[i]
+        
+        # If position changed from non-zero to zero, close the trade
+        if pos_change != 0 and current_position != 0 and pos_val == 0:
+            trades.append({
+                'start_time': current_trade_start,
+                'end_time': ts,
+                'position': current_position,
+                'pnl': current_trade_pnl
+            })
+            current_position = 0
+            current_trade_pnl = 0.0
+        
+        # If position changed from zero to non-zero, start new trade
+        elif pos_change != 0 and current_position == 0 and pos_val != 0:
+            current_position = pos_val
+            current_trade_start = ts
+            current_trade_pnl = 0.0
+        
+        # Accumulate PnL for current trade
+        if current_position != 0:
+            current_trade_pnl += pnl_net_series.iloc[i]
+    
+    # Close final trade if exists
+    if current_position != 0 and current_trade_start is not None:
+        trades.append({
+            'start_time': current_trade_start,
+            'end_time': pos.index[-1],
+            'position': current_position,
+            'pnl': current_trade_pnl
+        })
+    
+    if not trades:
+        return {
+            "TradeCount": 0,
+            "HitRatio": 0.0,
+            "AvgTradePnL": 0.0,
+            "MaxLossTrade": 0.0,
+            "MaxGainTrade": 0.0,
+            "AvgTradesPerDay": 0.0
+        }
+    
+    # Calculate trade metrics
+    trade_pnls = [trade['pnl'] for trade in trades]
+    profitable_trades = [pnl for pnl in trade_pnls if pnl > 0]
+    
+    hit_ratio = len(profitable_trades) / len(trade_pnls) if trade_pnls else 0.0
+    avg_trade_pnl = np.mean(trade_pnls) if trade_pnls else 0.0
+    max_loss_trade = min(trade_pnls) if trade_pnls else 0.0
+    max_gain_trade = max(trade_pnls) if trade_pnls else 0.0
+    
+    # Calculate average trades per day
+    trading_days = len(df.index.normalize().unique())
+    avg_trades_per_day = len(trades) / trading_days if trading_days > 0 else 0.0
+    
+    return {
+        "TradeCount": len(trades),
+        "HitRatio": round(hit_ratio * 100, 1),
+        "AvgTradePnL": round(avg_trade_pnl, 2),
+        "MaxLossTrade": round(max_loss_trade, 2),
+        "MaxGainTrade": round(max_gain_trade, 2),
+        "AvgTradesPerDay": round(avg_trades_per_day, 1)
+    }
 
 
 # ============================
@@ -416,19 +515,26 @@ def backtest_strategy(
     vol_annual = daily_ret.std() * math.sqrt(252)
     irr = (daily_aum.iloc[-1] / daily_aum.iloc[0]) ** (252 / len(daily_ret)) - 1 if len(daily_ret) > 0 else 0.0
     sharpe = (daily_ret.mean() / daily_ret.std()) * math.sqrt(252) if daily_ret.std() > 0 else 0.0
-    hit_ratio = (daily_ret > 0).mean() if len(daily_ret) > 0 else 0.0
     dd = (daily_aum / daily_aum.cummax() - 1.0).min()
+
+    # Trade-level metrics
+    trade_metrics = calculate_trade_metrics(df, pos, signed_shares_series, pnl_net_series, cfg)
 
     summary = {
         "TotalReturnPct": round((daily_aum.iloc[-1] / daily_aum.iloc[0] - 1) * 100, 2),
         "IRR": round(irr * 100, 2),
         "Vol": round(vol_annual * 100, 2),
         "Sharpe": round(sharpe, 2),
-        "HitRatio": round(hit_ratio * 100, 1),
+        "HitRatio": trade_metrics["HitRatio"],  # Now using trade-level hit ratio
         "MDDPct": round(dd * 100, 2),
         "FinalAUM": round(float(daily_aum.iloc[-1]), 2),
         "StartDate": as_date_str(daily_aum.index[0]),
         "EndDate": as_date_str(daily_aum.index[-1]),
+        "TradeCount": trade_metrics["TradeCount"],
+        "AvgTradePnL": trade_metrics["AvgTradePnL"],
+        "MaxLossTrade": trade_metrics["MaxLossTrade"],
+        "MaxGainTrade": trade_metrics["MaxGainTrade"],
+        "AvgTradesPerDay": trade_metrics["AvgTradesPerDay"],
     }
 
     result = pd.DataFrame(index=df.index)
@@ -445,35 +551,468 @@ def backtest_strategy(
 
 
 # ============================
+# Plotting Function
+# ============================
+
+def plot_noise_bands_for_day(
+    df: pd.DataFrame,
+    target_date: str,
+    volatility_multiplier: float,
+    gap_adjustment: bool,
+    lookback_days: int,
+    cfg: BacktestConfig,
+) -> None:
+    """
+    Plot noise bands for a specific day with historical price movement.
+    
+    Args:
+        df: DataFrame with minute bar data
+        target_date: Date string in YYYY-MM-DD format
+        volatility_multiplier: Multiplier for noise band calculation
+        gap_adjustment: Whether to use gap adjustment
+        lookback_days: Number of days for lookback period
+        cfg: Backtest configuration
+    """
+    # Convert target_date to datetime and filter data for that day
+    target_dt = pd.to_datetime(target_date).tz_localize(cfg.timezone)
+    day_mask = df.index.normalize() == target_dt.normalize()
+    day_data = df[day_mask].copy()
+    
+    if len(day_data) == 0:
+        print(f"No data found for date {target_date}")
+        return
+    
+    # Compute noise bands for the entire dataset (needed for historical context)
+    bands = compute_noise_bands(
+        df=df,
+        lookback_days=lookback_days,
+        vm=volatility_multiplier,
+        gap_adjustment=gap_adjustment,
+    )
+    
+    # Filter bands for the target day
+    day_bands = bands[day_mask].copy()
+    
+    # Create the plot
+    fig, ax = plt.subplots(figsize=(12, 8))
+    
+    # Plot price movement as heavy black line
+    ax.plot(day_data.index, day_data['close'], color='black', linewidth=3, label='Price')
+    
+    # Shade the noise area with pale yellow
+    ax.fill_between(day_data.index, day_bands['LB'], day_bands['UB'], 
+                   alpha=0.3, color='yellow', label='Noise Area')
+    
+    # Plot upper and lower boundaries
+    ax.plot(day_data.index, day_bands['UB'], color='red', linewidth=1, alpha=0.7, label='Upper Boundary')
+    ax.plot(day_data.index, day_bands['LB'], color='red', linewidth=1, alpha=0.7, label='Lower Boundary')
+    
+    # Format the plot
+    ax.set_title(f'Noise Bands for {target_date} - {cfg.symbol}\n'
+                f'Volatility Multiplier: {volatility_multiplier}, '
+                f'Gap Adjustment: {gap_adjustment}, '
+                f'Lookback: {lookback_days} days', 
+                fontsize=14, fontweight='bold')
+    ax.set_xlabel('Time', fontsize=12)
+    ax.set_ylabel('Price ($)', fontsize=12)
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    
+    # Format x-axis to show time properly
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M', tz=day_data.index.tz))
+    ax.xaxis.set_major_locator(mdates.MinuteLocator(interval=30))
+    plt.xticks(rotation=45)
+    
+    # Add some padding to y-axis
+    y_min, y_max = ax.get_ylim()
+    y_range = y_max - y_min
+    ax.set_ylim(y_min - 0.05 * y_range, y_max + 0.05 * y_range)
+    
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_strategy_performance(
+    result_df: pd.DataFrame,
+    summary: dict,
+    variant: str,
+    cfg: BacktestConfig,
+    save_plot: bool = True
+) -> None:
+    """
+    Plot comprehensive strategy performance over time.
+    
+    Args:
+        result_df: DataFrame with backtest results
+        summary: Dictionary with performance summary
+        variant: Strategy variant name
+        cfg: Backtest configuration
+        save_plot: Whether to save the plot to file
+    """
+    # Create figure with subplots
+    fig, axes = plt.subplots(3, 2, figsize=(16, 12))
+    fig.suptitle(f'Strategy Performance: {variant} - {cfg.symbol}\n'
+                f'{summary["StartDate"]} to {summary["EndDate"]}', 
+                fontsize=16, fontweight='bold')
+    
+    # 1. Equity Curve
+    ax1 = axes[0, 0]
+    daily_aum = result_df['aum'].groupby(result_df.index.date).last()
+    daily_aum = pd.Series(daily_aum.values, index=pd.to_datetime(daily_aum.index).tz_localize(cfg.timezone))
+    
+    ax1.plot(daily_aum.index, daily_aum.values, linewidth=2, color='blue', label='Strategy AUM')
+    ax1.set_title('Equity Curve', fontsize=12, fontweight='bold')
+    ax1.set_ylabel('AUM ($)', fontsize=10)
+    ax1.grid(True, alpha=0.3)
+    ax1.legend()
+    
+    # Format x-axis
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+    ax1.xaxis.set_major_locator(mdates.YearLocator())
+    plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45)
+    
+    # 2. Drawdown
+    ax2 = axes[0, 1]
+    cumulative_max = daily_aum.cummax()
+    drawdown = (daily_aum / cumulative_max - 1.0) * 100
+    
+    ax2.fill_between(daily_aum.index, drawdown.values, 0, alpha=0.3, color='red', label='Drawdown')
+    ax2.plot(daily_aum.index, drawdown.values, linewidth=1, color='red')
+    ax2.set_title('Drawdown (%)', fontsize=12, fontweight='bold')
+    ax2.set_ylabel('Drawdown (%)', fontsize=10)
+    ax2.grid(True, alpha=0.3)
+    ax2.legend()
+    
+    # Format x-axis
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+    ax2.xaxis.set_major_locator(mdates.YearLocator())
+    plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45)
+    
+    # 3. Daily Returns Distribution
+    ax3 = axes[1, 0]
+    daily_returns = daily_aum.pct_change().dropna() * 100
+    
+    ax3.hist(daily_returns, bins=50, alpha=0.7, color='green', edgecolor='black')
+    ax3.axvline(daily_returns.mean(), color='red', linestyle='--', linewidth=2, label=f'Mean: {daily_returns.mean():.2f}%')
+    ax3.set_title('Daily Returns Distribution', fontsize=12, fontweight='bold')
+    ax3.set_xlabel('Daily Return (%)', fontsize=10)
+    ax3.set_ylabel('Frequency', fontsize=10)
+    ax3.grid(True, alpha=0.3)
+    ax3.legend()
+    
+    # 4. Rolling Sharpe Ratio
+    ax4 = axes[1, 1]
+    rolling_window = 252  # 1 year
+    if len(daily_returns) >= rolling_window:
+        rolling_sharpe = daily_returns.rolling(window=rolling_window).mean() / daily_returns.rolling(window=rolling_window).std() * np.sqrt(252)
+        # Use the same index as rolling_sharpe for plotting
+        rolling_sharpe = rolling_sharpe.dropna()
+        ax4.plot(rolling_sharpe.index, rolling_sharpe.values, linewidth=2, color='purple', label='Rolling Sharpe (1Y)')
+        ax4.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+        ax4.axhline(y=1, color='green', linestyle='--', alpha=0.5, label='Sharpe = 1')
+        ax4.set_title('Rolling Sharpe Ratio (1 Year)', fontsize=12, fontweight='bold')
+        ax4.set_ylabel('Sharpe Ratio', fontsize=10)
+        ax4.grid(True, alpha=0.3)
+        ax4.legend()
+        
+        # Format x-axis
+        ax4.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+        ax4.xaxis.set_major_locator(mdates.YearLocator())
+        plt.setp(ax4.xaxis.get_majorticklabels(), rotation=45)
+    else:
+        ax4.text(0.5, 0.5, 'Insufficient data for rolling Sharpe', 
+                ha='center', va='center', transform=ax4.transAxes, fontsize=12)
+        ax4.set_title('Rolling Sharpe Ratio (1 Year)', fontsize=12, fontweight='bold')
+    
+    # 5. Position Distribution
+    ax5 = axes[2, 0]
+    position_counts = result_df['position'].value_counts()
+    colors = ['lightblue', 'lightgreen', 'lightcoral']
+    ax5.pie(position_counts.values, labels=['Flat', 'Long', 'Short'], autopct='%1.1f%%', 
+            colors=colors, startangle=90)
+    ax5.set_title('Position Distribution', fontsize=12, fontweight='bold')
+    
+    # 6. Performance Metrics Table
+    ax6 = axes[2, 1]
+    ax6.axis('tight')
+    ax6.axis('off')
+    
+    # Create metrics table
+    metrics_data = [
+        ['Total Return', f"{summary['TotalReturnPct']}%"],
+        ['Annualized Return', f"{summary['IRR']}%"],
+        ['Annualized Volatility', f"{summary['Vol']}%"],
+        ['Sharpe Ratio', f"{summary['Sharpe']}"],
+        ['Hit Ratio', f"{summary['HitRatio']}%"],
+        ['Max Drawdown', f"{summary['MDDPct']}%"],
+        ['Trade Count', f"{summary['TradeCount']}"],
+        ['Avg Trade PnL', f"${summary['AvgTradePnL']}"],
+        ['Avg Trades/Day', f"{summary['AvgTradesPerDay']}"],
+        ['Final AUM', f"${summary['FinalAUM']:,.0f}"]
+    ]
+    
+    table = ax6.table(cellText=metrics_data, colLabels=['Metric', 'Value'], 
+                     cellLoc='left', loc='center')
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1, 2)
+    
+    # Style the table
+    for i in range(len(metrics_data) + 1):
+        for j in range(2):
+            cell = table[(i, j)]
+            if i == 0:  # Header row
+                cell.set_facecolor('#4CAF50')
+                cell.set_text_props(weight='bold', color='white')
+            else:
+                cell.set_facecolor('#f0f0f0' if i % 2 == 0 else 'white')
+    
+    ax6.set_title('Performance Summary', fontsize=12, fontweight='bold')
+    
+    plt.tight_layout()
+    
+    if save_plot:
+        out_dir = os.path.join(os.getcwd(), "outputs")
+        os.makedirs(out_dir, exist_ok=True)
+        plot_filename = f"{cfg.symbol}_{variant}_performance.png"
+        plt.savefig(os.path.join(out_dir, plot_filename), dpi=300, bbox_inches='tight')
+        print(f"Performance plot saved to: {os.path.join(out_dir, plot_filename)}")
+    
+    plt.show()
+
+
+def plot_comparison_performance(
+    results_dict: dict,
+    cfg: BacktestConfig,
+    save_plot: bool = True
+) -> None:
+    """
+    Plot comparison of different strategy variants.
+    
+    Args:
+        results_dict: Dictionary with results for each variant
+        cfg: Backtest configuration
+        save_plot: Whether to save the plot to file
+    """
+    fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+    fig.suptitle(f'Strategy Comparison - {cfg.symbol}\n'
+                f'{cfg.start} to {cfg.end or "today"}', 
+                fontsize=16, fontweight='bold')
+    
+    colors = ['blue', 'red', 'green', 'orange']
+    
+    # 1. Equity Curves Comparison
+    ax1 = axes[0, 0]
+    for i, (variant, (result_df, summary)) in enumerate(results_dict.items()):
+        daily_aum = result_df['aum'].groupby(result_df.index.date).last()
+        daily_aum = pd.Series(daily_aum.values, index=pd.to_datetime(daily_aum.index).tz_localize(cfg.timezone))
+        
+        # Normalize to starting value for comparison
+        normalized_aum = daily_aum / daily_aum.iloc[0] * 100000
+        
+        ax1.plot(daily_aum.index, normalized_aum.values, linewidth=2, 
+                color=colors[i], label=f'{variant} (Final: ${summary["FinalAUM"]:,.0f})')
+    
+    ax1.set_title('Equity Curves Comparison', fontsize=12, fontweight='bold')
+    ax1.set_ylabel('Normalized AUM ($)', fontsize=10)
+    ax1.grid(True, alpha=0.3)
+    ax1.legend()
+    
+    # Format x-axis
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+    ax1.xaxis.set_major_locator(mdates.YearLocator())
+    plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45)
+    
+    # 2. Drawdown Comparison
+    ax2 = axes[0, 1]
+    for i, (variant, (result_df, summary)) in enumerate(results_dict.items()):
+        daily_aum = result_df['aum'].groupby(result_df.index.date).last()
+        daily_aum = pd.Series(daily_aum.values, index=pd.to_datetime(daily_aum.index).tz_localize(cfg.timezone))
+        
+        cumulative_max = daily_aum.cummax()
+        drawdown = (daily_aum / cumulative_max - 1.0) * 100
+        
+        ax2.plot(daily_aum.index, drawdown.values, linewidth=1.5, 
+                color=colors[i], label=f'{variant} (Max DD: {summary["MDDPct"]}%)')
+    
+    ax2.set_title('Drawdown Comparison', fontsize=12, fontweight='bold')
+    ax2.set_ylabel('Drawdown (%)', fontsize=10)
+    ax2.grid(True, alpha=0.3)
+    ax2.legend()
+    
+    # Format x-axis
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+    ax2.xaxis.set_major_locator(mdates.YearLocator())
+    plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45)
+    
+    # 3. Performance Metrics Comparison
+    ax3 = axes[1, 0]
+    ax3.axis('tight')
+    ax3.axis('off')
+    
+    # Prepare comparison table
+    metrics = ['TotalReturnPct', 'IRR', 'Vol', 'Sharpe', 'HitRatio', 'MDDPct', 'TradeCount']
+    metric_labels = ['Total Return (%)', 'IRR (%)', 'Vol (%)', 'Sharpe', 'Hit Ratio (%)', 'Max DD (%)', 'Trades']
+    
+    table_data = [metric_labels]
+    for variant, (_, summary) in results_dict.items():
+        row = [f"{summary[metric]}" for metric in metrics]
+        table_data.append(row)
+    
+    table = ax3.table(cellText=table_data[1:], colLabels=table_data[0], 
+                     rowLabels=list(results_dict.keys()),
+                     cellLoc='center', loc='center')
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1, 1.5)
+    
+    # Style the table
+    for i in range(len(table_data)):
+        for j in range(len(metrics)):
+            cell = table[(i, j)]
+            if i == 0:  # Header row
+                cell.set_facecolor('#4CAF50')
+                cell.set_text_props(weight='bold', color='white')
+            else:
+                cell.set_facecolor('#f0f0f0' if i % 2 == 0 else 'white')
+    
+    ax3.set_title('Performance Metrics Comparison', fontsize=12, fontweight='bold')
+    
+    # 4. Monthly Returns Heatmap (for the first variant)
+    ax4 = axes[1, 1]
+    if results_dict:
+        first_variant = list(results_dict.keys())[0]
+        result_df, _ = results_dict[first_variant]
+        
+        daily_aum = result_df['aum'].groupby(result_df.index.date).last()
+        daily_aum = pd.Series(daily_aum.values, index=pd.to_datetime(daily_aum.index).tz_localize(cfg.timezone))
+        daily_returns = daily_aum.pct_change().dropna()
+        
+        # Create monthly returns
+        monthly_returns = daily_returns.groupby([daily_returns.index.year, daily_returns.index.month]).apply(
+            lambda x: (1 + x).prod() - 1
+        ) * 100
+        
+        if len(monthly_returns) > 0:
+            # Reshape for heatmap
+            monthly_returns.index = pd.MultiIndex.from_tuples(monthly_returns.index, names=['Year', 'Month'])
+            monthly_returns = monthly_returns.unstack()
+            
+            im = ax4.imshow(monthly_returns.values, cmap='RdYlGn', aspect='auto', vmin=-10, vmax=10)
+            ax4.set_title(f'Monthly Returns Heatmap - {first_variant}', fontsize=12, fontweight='bold')
+            ax4.set_xlabel('Month', fontsize=10)
+            ax4.set_ylabel('Year', fontsize=10)
+            
+            # Set tick labels
+            ax4.set_xticks(range(12))
+            ax4.set_xticklabels(['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 
+                                'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'])
+            ax4.set_yticks(range(len(monthly_returns.index)))
+            ax4.set_yticklabels(monthly_returns.index)
+            
+            # Add colorbar
+            cbar = plt.colorbar(im, ax=ax4)
+            cbar.set_label('Monthly Return (%)', fontsize=10)
+        else:
+            ax4.text(0.5, 0.5, 'Insufficient data for heatmap', 
+                    ha='center', va='center', transform=ax4.transAxes, fontsize=12)
+            ax4.set_title(f'Monthly Returns Heatmap - {first_variant}', fontsize=12, fontweight='bold')
+    
+    plt.tight_layout()
+    
+    if save_plot:
+        out_dir = os.path.join(os.getcwd(), "outputs")
+        os.makedirs(out_dir, exist_ok=True)
+        plot_filename = f"{cfg.symbol}_strategy_comparison.png"
+        plt.savefig(os.path.join(out_dir, plot_filename), dpi=300, bbox_inches='tight')
+        print(f"Comparison plot saved to: {os.path.join(out_dir, plot_filename)}")
+    
+    plt.show()
+
+
+# ============================
 # Runner
 # ============================
 
 def run_backtests(cfg: Optional[BacktestConfig] = None) -> None:
-    cfg = cfg or BacktestConfig(symbol='TQQQ',start='2025-01-01')
+    cfg = cfg or BacktestConfig()
     load_env()
     client = get_alpaca_client(cfg.session)
 
     print(f"Fetching minute bars for {cfg.symbol} from {cfg.start} to {cfg.end or 'today'}...")
     df = fetch_intraday_bars(client, cfg.symbol, cfg.start, cfg.end)
 
-    print("Running Opposite Band stop variant...")
-    res_opp, sum_opp = backtest_strategy(df, cfg, variant="opp_band")
+    # print("Running Opposite Band stop variant...")
+    # res_opp, sum_opp = backtest_strategy(df, cfg, variant="opp_band")
     print("Running Current Band + VWAP stop variant...")
     res_vwap, sum_vwap = backtest_strategy(df, cfg, variant="curr_band_vwap")
 
-    print("\nSummary (Opposite Band stop):")
-    print(json.dumps(sum_opp, indent=2))
+    # print("\nSummary (Opposite Band stop):")
+    # print(json.dumps(sum_opp, indent=2))
     print("\nSummary (Current Band + VWAP stop):")
     print(json.dumps(sum_vwap, indent=2))
+
+    # Generate performance plots
+    print("\nGenerating performance plots...")
+    
+    # Individual strategy performance plots
+    # plot_strategy_performance(res_opp, sum_opp, "opp_band", cfg)
+    plot_strategy_performance(res_vwap, sum_vwap, "curr_band_vwap", cfg)
+    
+    # Comparison plot
+    results_dict = {
+        # "Opposite Band": (res_opp, sum_opp),
+        "Current Band + VWAP": (res_vwap, sum_vwap)
+    }
+    plot_comparison_performance(results_dict, cfg)
 
     # Save outputs
     out_dir = os.path.join(os.getcwd(), "outputs")
     os.makedirs(out_dir, exist_ok=True)
-    res_opp.to_csv(os.path.join(out_dir, f"{cfg.symbol}_opp_band.csv"))
+    # res_opp.to_csv(os.path.join(out_dir, f"{cfg.symbol}_opp_band.csv"))
     res_vwap.to_csv(os.path.join(out_dir, f"{cfg.symbol}_curr_band_vwap.csv"))
     with open(os.path.join(out_dir, f"{cfg.symbol}_summaries.json"), "w") as f:
-        json.dump({"opp_band": sum_opp, "curr_band_vwap": sum_vwap}, f, indent=2)
+        # json.dump({"opp_band": sum_opp, "curr_band_vwap": sum_vwap}, f, indent=2)
+        json.dump({"curr_band_vwap": sum_vwap}, f, indent=2)
 
 
 if __name__ == "__main__":
-    run_backtests()
+    cfg = BacktestConfig(symbol='SPY')
+    run_backtests(cfg=cfg)
+    cfg = BacktestConfig(symbol='HIBL')
+    run_backtests(cfg=cfg)
+    cfg = BacktestConfig(symbol='TQQQ')
+    run_backtests(cfg=cfg)
+    cfg = BacktestConfig(symbol='QQQ')
+    run_backtests(cfg=cfg)
+
+
+def demo_plot_noise_bands(cfg: Optional[BacktestConfig] = None) -> None:
+    """
+    Demonstration function showing how to plot noise bands for a specific day.
+    """
+    cfg = cfg or BacktestConfig(symbol='SPY', start='2022-04-01', end='2024-05-01', timezone='America/New_York')
+    load_env()
+    client = get_alpaca_client(cfg.session)
+
+    print(f"Fetching minute bars for {cfg.symbol} from {cfg.start} to {cfg.end or 'today'}...")
+    df = fetch_intraday_bars(client, cfg.symbol, cfg.start, cfg.end)
+
+    # Example: Plot noise bands for a specific day
+    target_date = "2022-04-29"  # Change this to any date in your data range
+    volatility_multiplier = 1.0
+    gap_adjustment = True
+    lookback_days = 14
+
+    print(f"Plotting noise bands for {target_date}...")
+    plot_noise_bands_for_day(
+        df=df,
+        target_date=target_date,
+        volatility_multiplier=volatility_multiplier,
+        gap_adjustment=gap_adjustment,
+        lookback_days=lookback_days,
+        cfg=cfg,
+    )
+
+
+

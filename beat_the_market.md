@@ -194,15 +194,8 @@ $$
 
 Figure 5(b) illustrates the revised approach in the case study of January 20, 2022. Including VWAP allows us to close the long exposure at 13:00, ultimately achieving a break-even trade. This adjustment represents a significant improvement, showcasing VWAP's efficacy as a dynamic stop loss mechanism that aligns closely with market momentum, thus enhancing the strategy's risk management capabilities.
 
-To demonstrate the economic advantages of these trailing stop refinements, we have conducted a comprehensive historical backtest, the results of which are displayed in Figure 6 and Table 2. The improvements are substantial: the average annual return increases to 9.7%, while annual volatility decreases to 7.7%. The Sharpe Ratio doubles, improving
 
-<sup>2</sup>VWAP is computed only using market hours data. For more details see our previous publication [5].
-
-![img-6.jpeg](img-6.jpeg)
-
-Figure 6: Comparison of equity curves of intraday momentum strategy with a) stop loss at opposite band, b) current band with VWAP, and c) SPY buy-hold strategy. Commission set at $0.0035 as per Interactive Brokers' entry-level rate.
-
-from 0.61 to 1.24, while the Hit Ratio decreased to 43% due to tighter stops. As exhibited in Table A1, the skewness shifts to positive (from -1.24 to 1.29) and the worst daily re- turn sees a 5% improvement (from -10.3% to -4.8%). However, the tighter stop loss does result in a significant increase in the total number of trades, rising from 5,494 to 7,668 over the 17-year period (see Table 4). These results highlight the enhanced risk-return profile achieved by the strategic modifications, albeit with an increase in trading activity.
+To demonstrate the economic advantages of these trailing stop refinements, we have conducted a comprehensive historical backtest, the results of which are displayed in Figure 6 and Table 2. The improvements are substantial: the average annual return increases to 9.7%, while annual volatility decreases to 7.7%. The Sharpe Ratio doubles, improving from 0.61 to 1.24, while the Hit Ratio decreased to 43% due to tighter stops. As exhibited in Table A1, the skewness shifts to positive (from -1.24 to 1.29) and the worst daily re- turn sees a 5% improvement (from -10.3% to -4.8%). However, the tighter stop loss does result in a significant increase in the total number of trades, rising from 5,494 to 7,668 over the 17-year period (see Table 4). These results highlight the enhanced risk-return profile achieved by the strategic modifications, albeit with an increase in trading activity.
 
 As a final refinement to our model, we have implemented a sizing methodology that dynamically adjusts the traded exposure based on daily market volatility. Instead of maintaining constant full notional exposure, this method targets a daily market volatility
 
