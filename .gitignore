@@ -11,6 +11,8 @@ __pycache__/
 
 *.log
 
+logs
+
 outputs/
 
 NextSteps.md
