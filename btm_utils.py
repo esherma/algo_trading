@@ -28,7 +28,7 @@ class TradingConfig:
     volatility_multiplier: float = 1
     use_gap_adjustment: bool = True
     entry_minutes: Tuple[int, int] = (0, 30)  # HH:00 and HH:30
-    start_trading_time: str = "10:00"  # first possible decision time
+    start_trading_time: str = "09:59"  # first possible decision time (15 seconds before 10:00)
     close_time: str = "16:00"
     target_daily_volatility: float = 0.02  # 2%
     leverage_cap: float = 3.0

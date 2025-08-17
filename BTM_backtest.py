@@ -31,7 +31,7 @@ class BacktestConfig:
     start: str = "2018-01-01"
     end: Optional[str] = None  # inclusive end date in YYYY-MM-DD, None = today
     lookback_days: int = 14
-    volatility_multiplier: float = 1.0
+    volatility_multiplier: float = 1
     use_gap_adjustment: bool = True
     entry_minutes: Tuple[int, int] = (0, 30)  # HH:00 and HH:30
     start_trading_time: str = "10:00"  # first possible decision time
@@ -418,8 +418,8 @@ def compute_dynamic_shares(
     daily = compute_daily_ohlcv(df)
     daily_ret = daily["close"].pct_change()
     # 14-day rolling stdev as per paper
-    rolling_std = daily_ret.rolling(window=14, min_periods=1).std()
-    rolling_mean = daily_ret.rolling(window=14, min_periods=1).mean()
+    rolling_std = daily_ret.rolling(window=cfg.lookback_days, min_periods=1).std()
+    rolling_mean = daily_ret.rolling(window=cfg.lookback_days, min_periods=1).mean()
     # Map to minute index
     sigma_spy = rolling_std.reindex(df.index.normalize(), method="ffill").fillna(method="ffill")
     # Shares_t = floor(AUM_{t-1} * min(4, sigma_target/sigma_spy) / Open_{t,9:30}) at day-open
@@ -455,7 +455,7 @@ def backtest_strategy(
     # Prepare daily constants
     daily = compute_daily_ohlcv(df)
     daily_ret_hist = daily["close"].pct_change()
-    sigma_spy_day = daily_ret_hist.rolling(window=14, min_periods=1).std().fillna(method="bfill").fillna(0.01)
+    sigma_spy_day = daily_ret_hist.rolling(window=cfg.lookback_days, min_periods=1).std().fillna(method="bfill").fillna(0.01)
     day_open = df.groupby(df.index.date)["open"].first()
     day_open = pd.Series(day_open.values, index=pd.to_datetime(day_open.index).tz_localize(cfg.timezone))
 
@@ -978,8 +978,6 @@ def run_backtests(cfg: Optional[BacktestConfig] = None) -> None:
 
 if __name__ == "__main__":
     cfg = BacktestConfig(symbol='SPY')
-    run_backtests(cfg=cfg)
-    cfg = BacktestConfig(symbol='HIBL')
     run_backtests(cfg=cfg)
     cfg = BacktestConfig(symbol='TQQQ')
     run_backtests(cfg=cfg)

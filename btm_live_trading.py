@@ -50,6 +50,11 @@ class BTMLiveTrader:
         self.noise_bands = None
         self.positions_df = None
         
+        # Daily pre-calculated values (fixed for the day)
+        self.daily_leverage = 1.0
+        self.daily_volatility = 0.02
+        self.in_play_tickers = {"long_ticker": "SPY", "short_ticker": "SPDN"}
+        
         # Market data stream
         self.data_stream = StockDataStream(
             os.getenv("ALPACA_PAPER_API_KEY") if config.session == "paper" else os.getenv("ALPACA_LIVE_API_KEY"),
@@ -106,6 +111,36 @@ class BTMLiveTrader:
         
         print("Noise bands calculated successfully")
     
+    def calculate_daily_leverage_and_tickers(self) -> None:
+        """
+        Calculate daily leverage and determine which two tickers are in play for the day.
+        This is fixed for the entire trading day based on pre-market volatility calculation.
+        """
+        # Calculate daily volatility (fixed for the day)
+        self.daily_volatility = self.calculate_daily_volatility()
+        
+        # Calculate leverage
+        if self.daily_volatility <= 0:
+            self.daily_leverage = 1.0
+        else:
+            calculated_leverage = self.config.target_daily_volatility / self.daily_volatility
+            self.daily_leverage = min(self.config.leverage_cap, calculated_leverage)
+            self.daily_leverage = max(-self.config.leverage_cap, self.daily_leverage)
+        
+        # Determine which two tickers are in play for the day based on leverage
+        if self.daily_leverage >= 2.5:
+            self.in_play_tickers = {"long_ticker": "SPXL", "short_ticker": "SPXS"}
+        elif self.daily_leverage >= 1.5:
+            self.in_play_tickers = {"long_ticker": "SPUU", "short_ticker": "SDS"}
+        else:
+            self.in_play_tickers = {"long_ticker": "SPY", "short_ticker": "SPDN"}
+        
+        print(f"Daily pre-calculated values:")
+        print(f"  Volatility: {self.daily_volatility:.4f} ({self.daily_volatility*100:.2f}%)")
+        print(f"  Leverage: {self.daily_leverage:.2f}")
+        print(f"  Long Ticker: {self.in_play_tickers['long_ticker']}")
+        print(f"  Short Ticker: {self.in_play_tickers['short_ticker']}")
+    
     def get_current_price(self, symbol: str) -> float:
         """Get current price for a symbol."""
         try:
@@ -116,21 +151,37 @@ class BTMLiveTrader:
             print(f"Error getting price for {symbol}: {e}")
             return None
     
-    def calculate_current_volatility(self) -> float:
-        """Calculate current daily volatility based on historical data."""
+    def calculate_daily_volatility(self) -> float:
+        """
+        Calculate daily volatility based on the preceding 14 days of daily returns.
+        This matches the formula: σ_{SPY,t} = sqrt( (1/13) * Σ_{i=1}^{14} (ret_{t-i} - μ_{SPY,t})^2 )
+        where μ_{SPY,t} = (1/14) * Σ_{i=1}^{14} (ret_{t-i})
+        """
         if self.historical_data is None:
             return 0.02  # Default 2% volatility
         
         daily = compute_daily_ohlcv(self.historical_data)
         daily_returns = daily["close"].pct_change().dropna()
         
-        # Use 14-day rolling volatility
-        if len(daily_returns) >= 14:
-            return float(daily_returns.rolling(window=14).std().iloc[-1])
-        elif len(daily_returns) > 0:
-            return float(daily_returns.std())
-        else:
-            return 0.02  # Default 2% volatility
+        # Need at least 14 days of data
+        if len(daily_returns) < 14:
+            if len(daily_returns) > 0:
+                return float(daily_returns.std())
+            else:
+                return 0.02  # Default 2% volatility
+        
+        # Get the last 14 daily returns
+        last_14_returns = daily_returns.tail(14)
+        
+        # Calculate mean return for the 14-day period
+        mean_return = last_14_returns.mean()
+        
+        # Calculate standard deviation using the formula from the paper
+        # σ = sqrt( (1/13) * Σ(return - mean_return)^2 )
+        variance = ((last_14_returns - mean_return) ** 2).sum() / 13
+        volatility = math.sqrt(variance)
+        
+        return float(volatility)
     
     def should_trade_now(self) -> bool:
         """Check if we should make a trading decision now."""
@@ -168,7 +219,7 @@ class BTMLiveTrader:
         # Close position at 15:49:30 if still open
         close_time = now.replace(hour=15, minute=49, second=30, microsecond=0)
         
-        return (now >= (close_time and (self.current_position != 0)))
+        return now >= close_time and self.current_position != 0
     
     def get_current_market_data(self) -> Dict[str, Any]:
         """Get current market data for SPY."""
@@ -247,50 +298,58 @@ class BTMLiveTrader:
         vwap = self.calculate_intraday_vwap(today_data)
         current_vwap = vwap.iloc[-1] if len(vwap) > 0 else current_price
         
-        # Generate trading signal
-        signal = 0
-        if current_price > ub:
-            signal = 1
-        elif current_price < lb:
-            signal = -1
-        
-        # Position management with VWAP stop
+        # Simplified trading logic
         new_position = self.current_position
+        ticker = "SPY"  # Default
+        shares = 0
         
-        # Handle stops first
-        if self.current_position == 1:
-            stop_level = max(ub, current_vwap)
-            if current_price < stop_level:
+        # Check if we have an open position
+        if self.current_position != 0:
+            # Check if position should be closed
+            should_close = False
+            
+            if self.current_position == 1:  # Long position (SPY/SPUU/SPXL)
+                # Close if SPY price < upper bound
+                if current_price < ub:
+                    should_close = True
+            elif self.current_position == -1:  # Short position (SPDN/SDS/SPXS)
+                # Close if SPY price > lower bound
+                if current_price > lb:
+                    should_close = True
+            
+            if should_close:
                 new_position = 0
-        elif self.current_position == -1:
-            stop_level = min(lb, current_vwap)
-            if current_price > stop_level:
-                new_position = 0
+                ticker = "SPY"
         
-        # Apply new signal
-        if signal == 1:
-            new_position = 1
-        elif signal == -1:
-            new_position = -1
+        # If no position open OR position is about to be closed, check if we should open
+        if new_position == 0:
+            # Check SPY price vs bounds
+            if current_price < lb:
+                # Open short position
+                new_position = -1
+                ticker = self.in_play_tickers["short_ticker"]
+            elif current_price > ub:
+                # Open long position
+                new_position = 1
+                ticker = self.in_play_tickers["long_ticker"]
         
-        # Calculate leverage and ticker
-        current_volatility = self.calculate_current_volatility()
-        leverage, ticker = calculate_leverage_and_ticker(
-            self.config.target_daily_volatility,
-            current_volatility,
-            self.config.leverage_cap
-        )
-        
-        # Calculate shares to buy
-        account_info = self.get_account_info()
-        aum = account_info["portfolio_value"]
-        ticker_price = self.get_current_price(ticker)
-        
-        if ticker_price is None:
-            print(f"Could not get price for {ticker}")
-            return None
-        
-        shares = int(math.floor(aum / ticker_price)) if new_position != 0 else 0
+        # Calculate shares if we have a position
+        if new_position != 0:
+            account_info = self.get_account_info()
+            aum = account_info["portfolio_value"]
+            ticker_price = self.get_current_price(ticker)
+            if ticker_price is None:
+                print(f"Could not get price for {ticker}")
+                return None
+            if self.daily_leverage < 1:
+                shares = int(
+                    math.floor(
+                        (aum * self.daily_leverage) / 
+                        ticker_price
+                    )
+                )
+            else:
+                shares = int(math.floor(aum / ticker_price))
         
         decision = {
             "timestamp": current_time,
@@ -298,13 +357,13 @@ class BTMLiveTrader:
             "upper_band": ub,
             "lower_band": lb,
             "vwap": current_vwap,
-            "signal": signal,
             "current_position": self.current_position,
             "new_position": new_position,
-            "leverage": leverage,
+            "daily_volatility": self.daily_volatility,
+            "daily_leverage": self.daily_leverage,
             "ticker": ticker,
             "shares": shares,
-            "aum": aum
+            "aum": self.get_account_info()["portfolio_value"]
         }
         
         return decision
@@ -327,8 +386,8 @@ class BTMLiveTrader:
     def execute_trade(self, decision: Dict[str, Any]) -> bool:
         """Execute a trade based on the decision."""
         try:
-            # Close existing position if different from new position
-            if self.current_position != 0 and (self.current_position != decision["new_position"] or self.current_ticker != decision["ticker"]):
+            # Close existing position if position changes
+            if self.current_position != 0 and self.current_position != decision["new_position"]:
                 print(f"Closing position: {self.current_shares} shares of {self.current_ticker}")
                 
                 close_order = MarketOrderRequest(
@@ -406,6 +465,9 @@ class BTMLiveTrader:
         self.fetch_historical_data()
         self.calculate_noise_bands()
         
+        # Calculate daily leverage and tickers (fixed for the day)
+        self.calculate_daily_leverage_and_tickers()
+        
         # Get account info
         account_info = self.get_account_info()
         print(f"Account Portfolio Value: ${account_info['portfolio_value']:,.2f}")
@@ -432,10 +494,10 @@ class BTMLiveTrader:
                         print(f"Upper Band: ${decision['upper_band']:.2f}")
                         print(f"Lower Band: ${decision['lower_band']:.2f}")
                         print(f"VWAP: ${decision['vwap']:.2f}")
-                        print(f"Signal: {decision['signal']}")
+                        print(f"Daily Volatility: {decision['daily_volatility']:.4f} ({decision['daily_volatility']*100:.2f}%)")
+                        print(f"Daily Leverage: {decision['daily_leverage']:.2f}")
                         print(f"Current Position: {decision['current_position']}")
                         print(f"New Position: {decision['new_position']}")
-                        print(f"Leverage: {decision['leverage']:.2f}")
                         print(f"Ticker: {decision['ticker']}")
                         print(f"Shares: {decision['shares']}")
                         

@@ -6,6 +6,7 @@ This script tests the basic functionality without making any trades.
 
 import os
 import sys
+import math
 from datetime import datetime, timedelta
 import pytz
 
@@ -91,18 +92,39 @@ def test_data_fetching():
         print(f"   Date range: {df.index[0]} to {df.index[-1]}")
         print(f"   Columns: {list(df.columns)}")
         
-        return df
+        return True
         
     except Exception as e:
         print(f"❌ Data fetching failed: {e}")
+        return False
+
+
+def fetch_test_data():
+    """Fetch test data for other tests."""
+    try:
+        historical_client = get_alpaca_client("paper")
+        end_date = datetime.now().strftime("%Y-%m-%d")
+        start_date = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
+        
+        df = fetch_intraday_bars(
+            historical_client,
+            "SPY",
+            start_date,
+            end_date
+        )
+        return df
+    except Exception as e:
+        print(f"Error fetching test data: {e}")
         return None
 
-
-def test_noise_bands(df):
+def test_noise_bands(df=None):
     """Test noise band calculation."""
     print("\n=== Testing Noise Band Calculation ===")
     
     try:
+        if df is None:
+            df = fetch_test_data()
+        
         config = TradingConfig()
         
         bands = compute_noise_bands(
@@ -122,10 +144,51 @@ def test_noise_bands(df):
         print(f"   Latest LB: ${latest['LB']:.2f}")
         print(f"   Latest Sigma: {latest['sigma']:.4f}")
         
-        return bands
+        return bands is not None
         
     except Exception as e:
         print(f"❌ Noise band calculation failed: {e}")
+        return None
+
+
+def test_volatility_calculation(df=None):
+    """Test volatility calculation matches the paper formula."""
+    print("\n=== Testing Volatility Calculation ===")
+    
+    try:
+        if df is None:
+            df = fetch_test_data()
+        
+        from btm_live_trading import BTMLiveTrader
+        
+        config = TradingConfig()
+        trader = BTMLiveTrader(config)
+        trader.historical_data = df
+        
+        # Calculate volatility using the new method
+        volatility = trader.calculate_daily_volatility()
+        
+        print(f"✅ Successfully calculated daily volatility")
+        print(f"   Volatility: {volatility:.4f} ({volatility*100:.2f}%)")
+        
+        # Verify it matches the expected formula
+        from btm_utils import compute_daily_ohlcv
+        daily = compute_daily_ohlcv(df)
+        daily_returns = daily["close"].pct_change().dropna()
+        
+        if len(daily_returns) >= 14:
+            last_14_returns = daily_returns.tail(14)
+            mean_return = last_14_returns.mean()
+            variance = ((last_14_returns - mean_return) ** 2).sum() / 13
+            expected_volatility = math.sqrt(variance)
+            
+            print(f"   Expected volatility: {expected_volatility:.4f}")
+            print(f"   Match: {'✅' if abs(volatility - expected_volatility) < 1e-6 else '❌'}")
+        
+        return volatility is not None
+        
+    except Exception as e:
+        print(f"❌ Volatility calculation test failed: {e}")
         return None
 
 
@@ -196,7 +259,7 @@ def test_trading_schedule():
             current_second = test_time.second
             
             is_decision_time = (current_minute in [59, 29] and current_second == 45)
-            is_after_start = test_time.time() >= datetime.strptime("10:00", "%H:%M").time()
+            is_after_start = test_time.time() >= datetime.strptime(config.start_trading_time, "%H:%M").time()
             is_before_end = test_time.time() < datetime.strptime("15:30", "%H:%M").time()
             
             result = is_decision_time and is_after_start and is_before_end
@@ -222,7 +285,8 @@ def main():
         ("Environment", test_environment),
         ("API Connectivity", test_api_connectivity),
         ("Data Fetching", test_data_fetching),
-        ("Noise Bands", lambda: test_noise_bands(test_data_fetching())),
+        ("Noise Bands", test_noise_bands),
+        ("Volatility Calculation", test_volatility_calculation),
         ("Leverage Mapping", test_leverage_mapping),
         ("Trading Schedule", test_trading_schedule),
     ]
@@ -233,10 +297,18 @@ def main():
         try:
             if test_name == "Noise Bands":
                 # Special handling for noise bands test
-                df = test_data_fetching()
+                df = fetch_test_data()
                 if df is not None:
-                    result = test_func()
-                    results.append((test_name, result is not None))
+                    result = test_func(df)
+                    results.append((test_name, result))
+                else:
+                    results.append((test_name, False))
+            elif test_name == "Volatility Calculation":
+                # Special handling for volatility calculation test
+                df = fetch_test_data()
+                if df is not None:
+                    result = test_func(df)
+                    results.append((test_name, result))
                 else:
                     results.append((test_name, False))
             else:

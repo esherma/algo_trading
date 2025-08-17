@@ -14,7 +14,7 @@ DEFAULT_CONFIG = TradingConfig(
     lookback_days=14,               # Days for noise band calculation
     volatility_multiplier=1.0,      # Multiplier for noise bands
     use_gap_adjustment=True,        # Use gap adjustment for bands
-    start_trading_time="10:00",     # First possible decision time
+    start_trading_time="09:59",     # First possible decision time
     close_time="16:00"              # Market close time
 )
 
@@ -27,7 +27,7 @@ CONSERVATIVE_CONFIG = TradingConfig(
     lookback_days=21,               # Longer lookback period
     volatility_multiplier=0.8,      # Smaller noise bands
     use_gap_adjustment=True,
-    start_trading_time="10:00",
+    start_trading_time="09:59",
     close_time="16:00"
 )
 
@@ -40,7 +40,7 @@ AGGRESSIVE_CONFIG = TradingConfig(
     lookback_days=10,               # Shorter lookback period
     volatility_multiplier=1.2,      # Larger noise bands
     use_gap_adjustment=True,
-    start_trading_time="10:00",
+    start_trading_time="09:59",
     close_time="16:00"
 )
 
@@ -53,7 +53,7 @@ LIVE_CONFIG = TradingConfig(
     lookback_days=14,
     volatility_multiplier=1.0,
     use_gap_adjustment=True,
-    start_trading_time="10:00",
+    start_trading_time="09:59",
     close_time="16:00"
 )
 
