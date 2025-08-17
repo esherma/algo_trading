@@ -22,6 +22,7 @@ from btm_utils import (
     compute_noise_bands, generate_positions, compute_daily_ohlcv,
     calculate_leverage_and_ticker
 )
+from btm_alerts import BTMAlertSystem
 
 
 class BTMLiveTrader:
@@ -58,8 +59,11 @@ class BTMLiveTrader:
         # Market data stream
         self.data_stream = StockDataStream(
             os.getenv("ALPACA_PAPER_API_KEY") if config.session == "paper" else os.getenv("ALPACA_LIVE_API_KEY"),
-            os.getenv("ALPACA_PAPER_API_SECRET") if config.session == "paper" else os.getenv("ALPACA_LIVE_API_SECRET")
+            os.getenv("ALPACA_PAPER_API_SECRET") if config.session == "paper" else os.getenv("ALPACA_PAPER_API_SECRET")
         )
+        
+        # Alert system
+        self.alert_system = BTMAlertSystem(config)
         
         print(f"Initialized BTM Live Trader for {config.session} trading")
         print(f"Strategy: Current Band + VWAP")
@@ -400,6 +404,16 @@ class BTMLiveTrader:
                 close_result = self.trading_client.submit_order(close_order)
                 print(f"Close order submitted: {close_result.id}")
                 
+                # Record trade for alert system
+                self.alert_system.add_trade({
+                    'timestamp': decision['timestamp'],
+                    'action': 'Close Position',
+                    'ticker': self.current_ticker,
+                    'shares': self.current_shares,
+                    'price': decision['current_price'],
+                    'value': self.current_shares * decision['current_price']
+                })
+                
                 # Reset position
                 self.current_position = 0
                 self.current_ticker = "SPY"
@@ -418,6 +432,16 @@ class BTMLiveTrader:
                 
                 open_result = self.trading_client.submit_order(open_order)
                 print(f"Open order submitted: {open_result.id}")
+                
+                # Record trade for alert system
+                self.alert_system.add_trade({
+                    'timestamp': decision['timestamp'],
+                    'action': 'Open Position',
+                    'ticker': decision['ticker'],
+                    'shares': decision['shares'],
+                    'price': decision['current_price'],
+                    'value': decision['shares'] * decision['current_price']
+                })
                 
                 # Update position
                 self.current_position = decision["new_position"]
@@ -446,6 +470,16 @@ class BTMLiveTrader:
                 close_result = self.trading_client.submit_order(close_order)
                 print(f"Close order submitted: {close_result.id}")
                 
+                # Record trade for alert system (end of day close)
+                self.alert_system.add_trade({
+                    'timestamp': datetime.now(self.tz),
+                    'action': 'End of Day Close',
+                    'ticker': self.current_ticker,
+                    'shares': self.current_shares,
+                    'price': 0.0,  # Will be filled with actual price when available
+                    'value': 0.0
+                })
+                
                 # Reset position
                 self.current_position = 0
                 self.current_ticker = "SPY"
@@ -468,10 +502,30 @@ class BTMLiveTrader:
         # Calculate daily leverage and tickers (fixed for the day)
         self.calculate_daily_leverage_and_tickers()
         
-        # Get account info
+        # Set up alert system with daily metrics and market data
+        self.alert_system.set_daily_metrics(
+            self.daily_volatility, 
+            self.daily_leverage, 
+            self.in_play_tickers
+        )
+        self.alert_system.set_market_data(self.historical_data, self.noise_bands)
+        
+        # Get account info and set opening AUM
         account_info = self.get_account_info()
+        opening_aum = account_info['portfolio_value']
+        self.alert_system.set_account_values(opening_aum, opening_aum)
+        
+        # Save opening AUM to file for evening digest
+        opening_aum_file = f"opening_aum_{datetime.now(self.tz).strftime('%Y%m%d')}.txt"
+        with open(opening_aum_file, 'w') as f:
+            f.write(str(opening_aum))
+        
         print(f"Account Portfolio Value: ${account_info['portfolio_value']:,.2f}")
         print(f"Buying Power: ${account_info['buying_power']:,.2f}")
+        
+        # Send morning alert
+        print("Sending morning alert...")
+        self.alert_system.send_morning_alert()
         
         # Main loop
         while True:
@@ -482,6 +536,15 @@ class BTMLiveTrader:
                 if self.should_close_position():
                     print("End of day - closing all positions")
                     self.close_all_positions()
+                    
+                    # Update closing AUM and send evening digest
+                    closing_account_info = self.get_account_info()
+                    closing_aum = closing_account_info['portfolio_value']
+                    self.alert_system.set_account_values(self.alert_system.opening_aum, closing_aum)
+                    
+                    print("Sending evening digest...")
+                    self.alert_system.send_evening_digest()
+                    
                     break
                 
                 # Check if we should make a trading decision
