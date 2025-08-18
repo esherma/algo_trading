@@ -177,7 +177,7 @@ def compute_sigma_series(df: pd.DataFrame, lookback_days: int) -> pd.Series:
         pivot.loc[s_by_day.index, t] = s_by_day.values
 
     # rolling mean over past N days per time column
-    pivot_sigma = pivot.rolling(window=lookback_days, min_periods=1).mean()
+    pivot_sigma = pivot.rolling(window=lookback_days).mean()
 
     # map back to original minute index
     for idx, ts in enumerate(df.index):

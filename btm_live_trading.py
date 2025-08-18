@@ -2,7 +2,7 @@ import os
 import asyncio
 import time
 import math
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional, Dict, Any
 import pytz
 import pandas as pd
@@ -216,41 +216,25 @@ class BTMLiveTrader:
         
         return False
     
-    def should_close_position(self) -> bool:
+    def check_end_of_day(self, cut_off_datetime: datetime) -> bool:
         """Check if we should close position at end of day."""
         now = datetime.now(self.tz)
         
-        # Close position at 15:49:30 if still open
-        close_time = now.replace(hour=15, minute=49, second=30, microsecond=0)
-        
-        return now >= close_time and self.current_position != 0
+        return now >= cut_off_datetime
     
     def get_current_market_data(self) -> Dict[str, Any]:
         """Get current market data for SPY."""
-        try:
-            # Get latest bar data for SPY
-            end_time = datetime.now(self.tz)
-            start_time = end_time - timedelta(minutes=5)  # Get last 5 minutes
-            
-            request = StockBarsRequest(
-                symbol_or_symbols=self.config.symbol,
-                timeframe=TimeFrame.Minute,
-                start=start_time,
-                end=end_time
+        try:            
+            request = StockLatestQuoteRequest(
+                symbol_or_symbols=self.config.symbol
             )
             
-            bars = self.historical_client.get_stock_bars(request)
+            quote = self.historical_client.get_latest_stock_quote(request)
             
-            if self.config.symbol in bars.data and len(bars.data[self.config.symbol]) > 0:
-                latest_bar = bars.data[self.config.symbol][-1]
+            if self.config.symbol in quote:
                 return {
-                    "timestamp": latest_bar.timestamp,
-                    "open": float(latest_bar.open),
-                    "high": float(latest_bar.high),
-                    "low": float(latest_bar.low),
-                    "close": float(latest_bar.close),
-                    "volume": int(latest_bar.volume),
-                    "vwap": float(latest_bar.vwap) if latest_bar.vwap else float(latest_bar.close)
+                    "timestamp": quote[self.config.symbol].timestamp.astimezone(self.tz),
+                    "midpoint": (quote[self.config.symbol].ask_price + quote[self.config.symbol].bid_price) / 2
                 }
         except Exception as e:
             print(f"Error getting current market data: {e}")
@@ -269,26 +253,25 @@ class BTMLiveTrader:
             print("Could not get current market data.")
             return None
         
-        current_price = market_data["close"]
+        current_price = market_data["midpoint"]
         current_time = market_data["timestamp"]
         
-        # Find the corresponding noise band values
+        # Find the corresponding noise band values based on last trading day's data
         # We need to find the closest time in our historical data
-        time_str = current_time.strftime("%H:%M")
-        today = current_time.date()
+        last_trading_day = self.noise_bands.iloc[-1].name.date()
         
         # Get today's data from historical data
-        today_mask = self.historical_data.index.date == today
-        today_data = self.historical_data[today_mask]
+        date_mask = self.noise_bands.index.date == last_trading_day
+        last_trading_day_noise_bands_data = self.noise_bands[date_mask]
         
-        if len(today_data) == 0:
+        if len(last_trading_day_noise_bands_data) == 0:
             print("No data for today available.")
             return None
         
         # Find the closest time to current time
-        time_diff = abs(today_data.index - current_time)
+        time_diff = abs(last_trading_day_noise_bands_data.index - current_time)
         closest_idx = time_diff.argmin()
-        closest_time = today_data.index[closest_idx]
+        closest_time = last_trading_day_noise_bands_data.index[closest_idx]
         
         # Get noise band values for this time
         if closest_time in self.noise_bands.index:
@@ -299,8 +282,9 @@ class BTMLiveTrader:
             return None
         
         # Calculate VWAP for today
-        vwap = self.calculate_intraday_vwap(today_data)
-        current_vwap = vwap.iloc[-1] if len(vwap) > 0 else current_price
+        vwap = self.retrieve_intraday_vwap()
+        # This line will evaluate to vwap if vwap is truthy (not None, not 0, not empty), otherwise it will evaluate to current_price.
+        current_vwap = vwap if vwap else current_price
         
         # Simplified trading logic
         new_position = self.current_position
@@ -372,20 +356,20 @@ class BTMLiveTrader:
         
         return decision
     
-    def calculate_intraday_vwap(self, df: pd.DataFrame) -> pd.Series:
-        """Calculate intraday VWAP for a given dataframe."""
-        vwap_vals = []
-        cum_pv = 0.0
-        cum_vol = 0.0
+    def retrieve_intraday_vwap(self) -> pd.Series:
+        """Retrieve latest VWAP."""
+        now = datetime.now(self.tz)
+
+        five_minutes_ago = now.replace(minute = now.minute - 1)
+
+        bars = fetch_intraday_bars(
+            self.historical_client,
+            self.config.symbol,
+            start=five_minutes_ago,
+            end=now
+        )
         
-        for _, row in df.iterrows():
-            price = row["close"]
-            vol = float(row["volume"]) if not math.isnan(row["volume"]) else 0.0
-            cum_pv += price * vol
-            cum_vol += vol
-            vwap_vals.append(cum_pv / cum_vol if cum_vol > 0 else price)
-        
-        return pd.Series(vwap_vals, index=df.index)
+        return bars[-1]['vwap']
     
     def execute_trade(self, decision: Dict[str, Any]) -> bool:
         """Execute a trade based on the decision."""
@@ -494,6 +478,8 @@ class BTMLiveTrader:
     async def run_trading_loop(self) -> None:
         """Main trading loop."""
         print("Starting trading loop...")
+
+        trading_cutoff = datetime.now(self.tz).replace(hour=15, minute=49, second=30, microsecond=0)
         
         # Initial setup
         self.fetch_historical_data()
@@ -533,7 +519,7 @@ class BTMLiveTrader:
                 now = datetime.now(self.tz)
                 
                 # Check if we should close positions at end of day
-                if self.should_close_position():
+                if self.check_end_of_day(trading_cutoff):
                     print("End of day - closing all positions")
                     self.close_all_positions()
                     

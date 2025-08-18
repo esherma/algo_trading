@@ -218,27 +218,27 @@ class BTMAlertSystem:
         if self.historical_data is None or self.noise_bands is None:
             return None
         
-        # Get today's data
-        today = datetime.now(self.tz).date()
-        today_mask = self.historical_data.index.date == today
-        today_data = self.historical_data[today_mask]
-        today_bands = self.noise_bands[today_mask]
+        # Get data for today's plot ... based on noise bands as of YESTERDAY's data
+        last_trading_day = self.noise_bands.iloc[-1].name.date()
+        last_trading_day_mask = self.historical_data.index.date == last_trading_day
+        last_trading_day_data = self.historical_data[last_trading_day_mask]
+        last_trading_day_bands = self.noise_bands[last_trading_day_mask]
         
-        if len(today_data) == 0:
+        if len(last_trading_day_data) == 0:
             return None
         
         # Create the plot
         fig, ax = plt.subplots(figsize=(12, 8))
         
         # Plot price
-        ax.plot(today_data.index, today_data['close'], label='SPY Price', color='black', linewidth=2)
+        ax.plot(last_trading_day_data.index, last_trading_day_data['close'], label='SPY Price', color='black', linewidth=2)
         
         # Plot noise bands
-        ax.plot(today_bands.index, today_bands['UB'], label='Upper Band', color='red', linestyle='--', alpha=0.7)
-        ax.plot(today_bands.index, today_bands['LB'], label='Lower Band', color='red', linestyle='--', alpha=0.7)
+        ax.plot(last_trading_day_bands.index, last_trading_day_bands['UB'], label='Upper Band', color='red', linestyle='--', alpha=0.7)
+        ax.plot(last_trading_day_bands.index, last_trading_day_bands['LB'], label='Lower Band', color='red', linestyle='--', alpha=0.7)
         
         # Fill the bands area
-        ax.fill_between(today_bands.index, today_bands['LB'], today_bands['UB'], 
+        ax.fill_between(last_trading_day_bands.index, last_trading_day_bands['LB'], last_trading_day_bands['UB'], 
                        alpha=0.1, color='red', label='Noise Bands')
         
         # Add trade annotations if requested
@@ -252,11 +252,11 @@ class BTMAlertSystem:
                         trade_time = trade_time.tz_convert(self.tz)
                     
                     # Find closest time in today's data
-                    time_diff = abs(today_data.index - trade_time)
+                    time_diff = abs(last_trading_day_data.index - trade_time)
                     if len(time_diff) > 0:
                         closest_idx = time_diff.argmin()
-                        closest_time = today_data.index[closest_idx]
-                        price_at_time = today_data.loc[closest_time, 'close']
+                        closest_time = last_trading_day_data.index[closest_idx]
+                        price_at_time = last_trading_day_data.loc[closest_time, 'close']
                         
                         # Plot trade marker
                         action = trade.get('action', 'Unknown')
@@ -284,7 +284,7 @@ class BTMAlertSystem:
                                   fontsize=8)
         
         # Format the plot
-        ax.set_title(f'BTM Noise Bands - {today.strftime("%Y-%m-%d")}', fontsize=14, fontweight='bold')
+        ax.set_title(f'BTM Noise Bands - {datetime.now().date().strftime("%Y-%m-%d")}', fontsize=14, fontweight='bold')
         ax.set_xlabel('Time', fontsize=12)
         ax.set_ylabel('SPY Price ($)', fontsize=12)
         ax.grid(True, alpha=0.3)
@@ -296,7 +296,7 @@ class BTMAlertSystem:
         plt.xticks(rotation=45)
         
         # Save the plot
-        plot_filename = f"noise_bands_{today.strftime('%Y%m%d')}.png"
+        plot_filename = os.path.join(os.getcwd(), f"noise_bands_{datetime.now().date().strftime('%Y%m%d')}.png")
         plt.tight_layout()
         plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
         plt.close()
@@ -345,6 +345,7 @@ class BTMAlertSystem:
         
         # Create and attach noise bands plot
         plot_filename = self.create_noise_bands_plot(include_trades=False)
+        print('Saving plot to', plot_filename)
         
         success = self.send_email(subject, html_content, plot_filename)
         
