@@ -7,6 +7,8 @@
 # Set the working directory to the script location
 cd "$(dirname "$0")"
 
+source /Users/eli/algo_trading/.venv/bin/activate
+
 # Set environment variables
 export PYTHONPATH="${PYTHONPATH}:$(pwd)"
 
