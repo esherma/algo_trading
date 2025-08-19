@@ -86,7 +86,7 @@ def fetch_intraday_bars(
     client: StockHistoricalDataClient,
     symbol: str,
     start: str,
-    end: Optional[str],
+    end: Optional[str] = None,
 ) -> pd.DataFrame:
     # Convert start/end dates to UTC, ensuring we get full trading days
     # Market opens at 09:30 EST/EDT, which is 14:30 UTC (EST) or 13:30 UTC (EDT)

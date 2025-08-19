@@ -17,7 +17,8 @@ import pytz
 from dotenv import load_dotenv
 
 # Local imports
-from btm_utils import TradingConfig, compute_noise_bands, compute_daily_ohlcv
+from btm_utils import TradingConfig, compute_noise_bands, compute_daily_ohlcv, fetch_intraday_bars, get_alpaca_client
+from trading_config import get_config
 
 
 class BTMAlertSystem:
@@ -213,26 +214,45 @@ class BTMAlertSystem:
         
         return html_content
     
-    def create_noise_bands_plot(self, include_trades: bool = False) -> str:
+    def create_noise_bands_plot(self, morning: bool=True, include_trades: bool = False) -> str:
         """Create a noise bands plot and save it to a file."""
-        if self.historical_data is None or self.noise_bands is None:
+        today = pd.Timestamp.now(self.tz).date()
+
+        if morning and (self.historical_data is None or self.noise_bands is None):
             return None
-        
-        # Get data for today's plot ... based on noise bands as of YESTERDAY's data
+
+        if not morning:
+            client = get_alpaca_client()
+            config = get_config()
+            self.historical_data = fetch_intraday_bars(client, symbol=config.symbol, start=today - timedelta(days=30))
+            self.noise_bands = compute_noise_bands(self.historical_data[self.historical_data.index.date < today], lookback_days=config.lookback_days, vm=config.volatility_multiplier, gap_adjustment=config.use_gap_adjustment)
+
         last_trading_day = self.noise_bands.iloc[-1].name.date()
-        last_trading_day_mask = self.historical_data.index.date == last_trading_day
-        last_trading_day_data = self.historical_data[last_trading_day_mask]
-        last_trading_day_bands = self.noise_bands[last_trading_day_mask]
+        last_trading_day_bands = self.noise_bands[self.noise_bands.index.date == last_trading_day]
         
-        if len(last_trading_day_data) == 0:
+        if len(last_trading_day_bands) == 0:
             return None
         
         # Create the plot
         fig, ax = plt.subplots(figsize=(12, 8))
         
         # Plot price
-        ax.plot(last_trading_day_data.index, last_trading_day_data['close'], label='SPY Price', color='black', linewidth=2)
+        if not morning:
+            today_mask = self.historical_data.index.date == today
+
+            # Recast historical_data[today_mask].index as same date as last_trading_day
+            recast_index = [
+                pd.Timestamp.combine(last_trading_day, t).tz_localize(self.tz)
+                for t in self.historical_data[today_mask].index.time
+            ]
+            complete_trading_day_data = self.historical_data[today_mask].copy()
+            complete_trading_day_data.insert(0, column = 'ts', value = recast_index)
+            complete_trading_day_data.set_index(keys='ts', drop=True, inplace=True)
+            print(complete_trading_day_data.index)
+            ax.plot(complete_trading_day_data.index, complete_trading_day_data['close'], label='SPY Price TODAY', color='black', linewidth=2)
         
+        print(last_trading_day_bands.index)
+
         # Plot noise bands
         ax.plot(last_trading_day_bands.index, last_trading_day_bands['UB'], label='Upper Band', color='red', linestyle='--', alpha=0.7)
         ax.plot(last_trading_day_bands.index, last_trading_day_bands['LB'], label='Lower Band', color='red', linestyle='--', alpha=0.7)
@@ -252,11 +272,12 @@ class BTMAlertSystem:
                         trade_time = trade_time.tz_convert(self.tz)
                     
                     # Find closest time in today's data
-                    time_diff = abs(last_trading_day_data.index - trade_time)
+                    time_diff = abs(self.historical_data.index - trade_time)
                     if len(time_diff) > 0:
                         closest_idx = time_diff.argmin()
-                        closest_time = last_trading_day_data.index[closest_idx]
-                        price_at_time = last_trading_day_data.loc[closest_time, 'close']
+                        closest_time = self.historical_data.index[closest_idx]
+                        closest_time_plotting = self.historical_data.index[closest_idx].replace(year=last_trading_day.year, month=last_trading_day.month, day=last_trading_day.day)
+                        price_at_time = self.historical_data.loc[closest_time, 'close']
                         
                         # Plot trade marker
                         action = trade.get('action', 'Unknown')
@@ -273,12 +294,12 @@ class BTMAlertSystem:
                             color = 'blue'
                             label = 'Trade'
                         
-                        ax.scatter(closest_time, price_at_time, marker=marker, s=100, 
+                        ax.scatter(closest_time_plotting, price_at_time, marker=marker, s=100, 
                                  color=color, zorder=5, label=label)
                         
                         # Add annotation
                         ax.annotate(f"{trade.get('ticker', 'Unknown')}\n{trade.get('shares', 0)} shares", 
-                                  (closest_time, price_at_time), 
+                                  (closest_time_plotting, price_at_time), 
                                   xytext=(10, 10), textcoords='offset points',
                                   bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7),
                                   fontsize=8)
@@ -291,12 +312,13 @@ class BTMAlertSystem:
         ax.legend()
         
         # Format x-axis
-        ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M', tz=self.tz))
         ax.xaxis.set_major_locator(mdates.MinuteLocator(interval=30))
         plt.xticks(rotation=45)
         
         # Save the plot
         plot_filename = os.path.join(os.getcwd(), f"noise_bands_{datetime.now().date().strftime('%Y%m%d')}.png")
+        print('Saving plot to', plot_filename)
         plt.tight_layout()
         plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
         plt.close()
@@ -361,7 +383,7 @@ class BTMAlertSystem:
         html_content = self.create_evening_digest()
         
         # Create and attach noise bands plot with trade annotations
-        plot_filename = self.create_noise_bands_plot(include_trades=True)
+        plot_filename = self.create_noise_bands_plot(morning=False, include_trades=True)
         
         success = self.send_email(subject, html_content, plot_filename)
         
