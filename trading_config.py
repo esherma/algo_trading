@@ -18,6 +18,19 @@ DEFAULT_CONFIG = TradingConfig(
     close_time="16:00"              # Market close time
 )
 
+# Default configuration for paper trading
+OFF_HOURS_CONFIG = TradingConfig(
+    symbol="FAKEPACA",                    # Base symbol for analysis
+    session="paper",                 # "paper" or "live"
+    leverage_cap=3.0,               # Maximum leverage
+    target_daily_volatility=0.02,   # Target daily volatility (2%)
+    lookback_days=14,               # Days for noise band calculation
+    volatility_multiplier=1.0,      # Multiplier for noise bands
+    use_gap_adjustment=True,        # Use gap adjustment for bands
+    start_trading_time="09:59",     # First possible decision time
+    close_time="16:00"              # Market close time
+)
+
 # Conservative configuration (lower leverage, higher volatility target)
 CONSERVATIVE_CONFIG = TradingConfig(
     symbol="SPY",
@@ -62,7 +75,8 @@ CONFIG_PRESETS = {
     "default": DEFAULT_CONFIG,
     "conservative": CONSERVATIVE_CONFIG,
     "aggressive": AGGRESSIVE_CONFIG,
-    "live": LIVE_CONFIG
+    "live": LIVE_CONFIG,
+    "off_hours": OFF_HOURS_CONFIG
 }
 
 def get_config(preset_name: str = "default") -> TradingConfig:

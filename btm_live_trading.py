@@ -1,26 +1,26 @@
 import os
 import asyncio
+import sys
 import math
 from datetime import date, datetime, timedelta
 from typing import Optional, Dict, Any
 import pytz
 import pandas as pd
+from dotenv import load_dotenv
 
 # Alpaca SDK
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.data.live import StockDataStream
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest
-from alpaca.data.timeframe import TimeFrame
+from alpaca.data.requests import StockLatestQuoteRequest
 
 # Local imports
 from btm_utils import (
-    TradingConfig, load_env, get_alpaca_client, fetch_intraday_bars,
-    compute_noise_bands, generate_positions, compute_daily_ohlcv,
-    calculate_leverage_and_ticker
+    TradingConfig, get_alpaca_client, fetch_intraday_bars,
+    compute_noise_bands, compute_daily_ohlcv, SharedQuoteData
 )
+from trading_config import get_config, print_config_summary
 from btm_alerts import BTMAlertSystem
 
 
@@ -30,7 +30,7 @@ class BTMLiveTrader:
         self.tz = pytz.timezone(config.timezone)
         
         # Initialize clients
-        load_env()
+        load_dotenv()
         self.historical_client = get_alpaca_client(config.session)
         self.trading_client = TradingClient(
             os.getenv("ALPACA_PAPER_API_KEY") if config.session == "paper" else os.getenv("ALPACA_LIVE_API_KEY"),
@@ -221,25 +221,6 @@ class BTMLiveTrader:
         
         return now >= cut_off_datetime
     
-    def get_current_market_data(self) -> Dict[str, Any]:
-        """Get current market data for SPY."""
-        try:            
-            request = StockLatestQuoteRequest(
-                symbol_or_symbols=self.config.symbol
-            )
-            
-            quote = self.historical_client.get_latest_stock_quote(request)
-            
-            if self.config.symbol in quote:
-                return {
-                    "timestamp": quote[self.config.symbol].timestamp.astimezone(self.tz),
-                    "midpoint": (quote[self.config.symbol].ask_price + quote[self.config.symbol].bid_price) / 2
-                }
-        except Exception as e:
-            print(f"Error getting current market data: {e}")
-        
-        return None
-    
     def make_trading_decision(self) -> Optional[Dict[str, Any]]:
         """Make a trading decision based on current market conditions."""
         if self.noise_bands is None:
@@ -247,13 +228,15 @@ class BTMLiveTrader:
             return None
         
         # Get current market data
-        market_data = self.get_current_market_data()
+        market_data = shared_data.get()
         if market_data is None:
             print("Could not get current market data.")
             return None
+        else:
+            market_data = dict(market_data)
         
-        current_price = market_data["midpoint"]
-        current_time = market_data["timestamp"]
+        current_price = market_data["close"]
+        current_time = pd.Timestamp(market_data["timestamp"]).astimezone(self.config.timezone) ## THIS IS IN UTC
         
         # Find the corresponding noise band values based on last trading day's data
         # We need to find the closest time in our historical data
@@ -281,9 +264,7 @@ class BTMLiveTrader:
             return None
         
         # Calculate VWAP for today
-        vwap = self.retrieve_intraday_vwap()
-        # This line will evaluate to vwap if vwap is truthy (not None, not 0, not empty), otherwise it will evaluate to current_price.
-        current_vwap = vwap if vwap else current_price
+        vwap = market_data['vwap']
         
         # Simplified trading logic
         new_position = self.current_position
@@ -297,11 +278,11 @@ class BTMLiveTrader:
             
             if self.current_position == 1:  # Long position (SPY/SPUU/SPXL)
                 # Close if SPY price < upper bound
-                if current_price < ub:
+                if current_price < max(ub, vwap):
                     should_close = True
             elif self.current_position == -1:  # Short position (SPDN/SDS/SPXS)
                 # Close if SPY price > lower bound
-                if current_price > lb:
+                if current_price > min(lb, vwap):
                     should_close = True
             
             if should_close:
@@ -315,16 +296,17 @@ class BTMLiveTrader:
                 # Open short position
                 new_position = -1
                 ticker = self.in_play_tickers["short_ticker"]
+                ticker_price = dict(shared_data_short_ticker.get())['close']
             elif current_price > ub:
                 # Open long position
                 new_position = 1
                 ticker = self.in_play_tickers["long_ticker"]
+                ticker_price = dict(shared_data_long_ticker.get())['close']
         
         # Calculate shares if we have a position
         if new_position != 0:
             account_info = self.get_account_info()
             aum = account_info["portfolio_value"]
-            ticker_price = self.get_current_price(ticker)
             if ticker_price is None:
                 print(f"Could not get price for {ticker}")
                 return None
@@ -343,7 +325,7 @@ class BTMLiveTrader:
             "current_price": current_price,
             "upper_band": ub,
             "lower_band": lb,
-            "vwap": current_vwap,
+            "vwap": vwap,
             "current_position": self.current_position,
             "new_position": new_position,
             "daily_volatility": self.daily_volatility,
@@ -354,21 +336,6 @@ class BTMLiveTrader:
         }
         
         return decision
-    
-    def retrieve_intraday_vwap(self) -> pd.Series:
-        """Retrieve latest VWAP."""
-        now = datetime.now(self.tz)
-
-        five_minutes_ago = now.replace(minute = now.minute - 1)
-
-        bars = fetch_intraday_bars(
-            self.historical_client,
-            self.config.symbol,
-            start=five_minutes_ago,
-            end=now
-        )
-        
-        return bars[-1]['vwap']
     
     def execute_trade(self, decision: Dict[str, Any]) -> bool:
         """Execute a trade based on the decision."""
@@ -521,6 +488,8 @@ class BTMLiveTrader:
                 if self.check_end_of_day(trading_cutoff):
                     print("End of day - closing all positions")
                     self.close_all_positions()
+
+                    asyncio.sleep(900)
                     
                     # Update closing AUM and send evening digest
                     closing_account_info = self.get_account_info()
@@ -560,6 +529,8 @@ class BTMLiveTrader:
                             print("No position change needed")
                     
                     self.last_decision_time = now
+                else:
+                    await asyncio.sleep(45)
                 
                 # Sleep for 1 second
                 await asyncio.sleep(1)
@@ -574,17 +545,12 @@ class BTMLiveTrader:
         print("Trading loop ended")
 
 
-def main():
-    """Main function to run the live trading strategy."""
-    import sys
-    
+if __name__ == "__main__":
     # Get configuration preset from command line argument
     preset_name = "default"
     if len(sys.argv) > 1:
         preset_name = sys.argv[1]
-    
     try:
-        from trading_config import get_config, print_config_summary
         config = get_config(preset_name)
         print_config_summary(config)
     except ImportError:
@@ -597,12 +563,30 @@ def main():
         )
         print("Using default configuration (trading_config.py not found)")
     
+    load_dotenv()
+
+    if preset_name == 'off_hours':
+        shared_data = SharedQuoteData(os.getenv("ALPACA_PAPER_API_KEY") if config.session == "paper" else os.getenv("ALPACA_LIVE_API_KEY"),
+            os.getenv("ALPACA_PAPER_API_SECRET") if config.session == "paper" else os.getenv("ALPACA_LIVE_API_SECRET"), symbol = config.symbol, url_override='wss://stream.data.alpaca.markets/v2/test')
+    else:
+        shared_data = SharedQuoteData(os.getenv("ALPACA_PAPER_API_KEY") if config.session == "paper" else os.getenv("ALPACA_LIVE_API_KEY"),
+            os.getenv("ALPACA_PAPER_API_SECRET") if config.session == "paper" else os.getenv("ALPACA_LIVE_API_SECRET"), symbol = config.symbol)
+
+
+    shared_data.start()
+
     # Create trader
     trader = BTMLiveTrader(config)
+
+    shared_data_short_ticker = SharedQuoteData(os.getenv("ALPACA_PAPER_API_KEY") if config.session == "paper" else os.getenv("ALPACA_LIVE_API_KEY"),
+            os.getenv("ALPACA_PAPER_API_SECRET") if config.session == "paper" else os.getenv("ALPACA_LIVE_API_SECRET"), symbol = trader.in_play_tickers['short_ticker'])
+
+    shared_data_short_ticker.start()
+
+    shared_data_long_ticker = SharedQuoteData(os.getenv("ALPACA_PAPER_API_KEY") if config.session == "paper" else os.getenv("ALPACA_LIVE_API_KEY"),
+            os.getenv("ALPACA_PAPER_API_SECRET") if config.session == "paper" else os.getenv("ALPACA_LIVE_API_SECRET"), symbol = trader.in_play_tickers['long_ticker'])
+
+    shared_data_long_ticker.start()
     
     # Run trading loop
     asyncio.run(trader.run_trading_loop())
-
-
-if __name__ == "__main__":
-    main()

@@ -90,9 +90,10 @@ def main():
     # For now, we'll use placeholder values
     try:
         from alpaca.trading.client import TradingClient
-        from btm_utils import load_env, get_alpaca_client
+        from btm_utils import get_alpaca_client
+        from dotenv import load_dotenv
         
-        load_env()
+        load_dotenv()
         trading_client = TradingClient(
             os.getenv("ALPACA_PAPER_API_KEY") if config.session == "paper" else os.getenv("ALPACA_LIVE_API_KEY"),
             os.getenv("ALPACA_PAPER_API_SECRET") if config.session == "paper" else os.getenv("ALPACA_LIVE_API_SECRET"),
