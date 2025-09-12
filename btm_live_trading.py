@@ -228,7 +228,7 @@ class BTMLiveTrader:
             return None
         
         # Get current market data
-        market_data = shared_data.get()
+        market_data = shared_data.get(self.config.symbol)
         if market_data is None:
             print("Could not get current market data.")
             return None
@@ -296,12 +296,12 @@ class BTMLiveTrader:
                 # Open short position
                 new_position = -1
                 ticker = self.in_play_tickers["short_ticker"]
-                ticker_price = dict(shared_data_short_ticker.get())['close']
+                ticker_price = shared_data.get(ticker)['close']
             elif current_price > ub:
                 # Open long position
                 new_position = 1
                 ticker = self.in_play_tickers["long_ticker"]
-                ticker_price = dict(shared_data_long_ticker.get())['close']
+                ticker_price = shared_data.get(ticker)['close']
         
         # Calculate shares if we have a position
         if new_position != 0:
@@ -468,7 +468,7 @@ class BTMLiveTrader:
         self.alert_system.set_account_values(opening_aum, opening_aum)
         
         # Save opening AUM to file for evening digest
-        opening_aum_file = f"opening_aum_{datetime.now(self.tz).strftime('%Y%m%d')}.txt"
+        opening_aum_file = f"logs/opening_aum_{datetime.now(self.tz).strftime('%Y%m%d')}.txt"
         with open(opening_aum_file, 'w') as f:
             f.write(str(opening_aum))
         
@@ -565,28 +565,19 @@ if __name__ == "__main__":
     
     load_dotenv()
 
-    if preset_name == 'off_hours':
-        shared_data = SharedQuoteData(os.getenv("ALPACA_PAPER_API_KEY") if config.session == "paper" else os.getenv("ALPACA_LIVE_API_KEY"),
-            os.getenv("ALPACA_PAPER_API_SECRET") if config.session == "paper" else os.getenv("ALPACA_LIVE_API_SECRET"), symbol = config.symbol, url_override='wss://stream.data.alpaca.markets/v2/test')
-    else:
-        shared_data = SharedQuoteData(os.getenv("ALPACA_PAPER_API_KEY") if config.session == "paper" else os.getenv("ALPACA_LIVE_API_KEY"),
-            os.getenv("ALPACA_PAPER_API_SECRET") if config.session == "paper" else os.getenv("ALPACA_LIVE_API_SECRET"), symbol = config.symbol)
-
-
-    shared_data.start()
-
     # Create trader
     trader = BTMLiveTrader(config)
 
-    shared_data_short_ticker = SharedQuoteData(os.getenv("ALPACA_PAPER_API_KEY") if config.session == "paper" else os.getenv("ALPACA_LIVE_API_KEY"),
-            os.getenv("ALPACA_PAPER_API_SECRET") if config.session == "paper" else os.getenv("ALPACA_LIVE_API_SECRET"), symbol = trader.in_play_tickers['short_ticker'])
 
-    shared_data_short_ticker.start()
+    if preset_name == 'off_hours':
+        shared_data = SharedQuoteData(os.getenv("ALPACA_PAPER_API_KEY") if config.session == "paper" else os.getenv("ALPACA_LIVE_API_KEY"),
+            os.getenv("ALPACA_PAPER_API_SECRET") if config.session == "paper" else os.getenv("ALPACA_LIVE_API_SECRET"), symbols = [config.symbol], url_override='wss://stream.data.alpaca.markets/v2/test')
+    else:
+        shared_data = SharedQuoteData(os.getenv("ALPACA_PAPER_API_KEY") if config.session == "paper" else os.getenv("ALPACA_LIVE_API_KEY"),
+            os.getenv("ALPACA_PAPER_API_SECRET") if config.session == "paper" else os.getenv("ALPACA_LIVE_API_SECRET"), symbols = [config.symbol, trader.in_play_tickers['short_ticker'], trader.in_play_tickers['long_ticker']])
 
-    shared_data_long_ticker = SharedQuoteData(os.getenv("ALPACA_PAPER_API_KEY") if config.session == "paper" else os.getenv("ALPACA_LIVE_API_KEY"),
-            os.getenv("ALPACA_PAPER_API_SECRET") if config.session == "paper" else os.getenv("ALPACA_LIVE_API_SECRET"), symbol = trader.in_play_tickers['long_ticker'])
 
-    shared_data_long_ticker.start()
+    shared_data.start()
     
     # Run trading loop
     asyncio.run(trader.run_trading_loop())

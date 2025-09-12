@@ -351,29 +351,29 @@ def calculate_leverage_and_ticker(
     return calculated_leverage, ticker
 
 class SharedQuoteData:
-    def __init__(self, api_key: str = None, secret_key: str = None, symbol: str = None, url_override: str = None):
-        self.latest_data = None
+    def __init__(self, api_key: str = None, secret_key: str = None, symbols: List[str] = None, url_override: str = None):
+        self.latest_data = {s: None for s in symbols}
         self.lock = Lock()
         self.wss_client = StockDataStream(api_key, secret_key, url_override=url_override)
-        self.symbol = symbol
+        self.symbols = symbols
 
     async def quote_data_handler(self, data):
         self.update(data)
 
     def update(self, data):
         with self.lock:
-            self.latest_data = data
+            self.latest_data[data["symbol"]] = data
 
-    def get(self):
+    def get(self, symbol: str):
         with self.lock:
-            return self.latest_data
+            return self.latest_data[symbol]
 
     def start(self):
         """Starts the WebSocket stream in a new thread with its own asyncio loop."""
         def run_stream():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            self.wss_client.subscribe_bars(self.quote_data_handler, self.symbol)
+            self.wss_client.subscribe_bars(self.quote_data_handler, self.symbols)
             self.wss_client.run()
 
         Thread(target=run_stream, daemon=True).start()
