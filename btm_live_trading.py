@@ -84,7 +84,7 @@ class BTMLiveTrader:
     
     def fetch_look_back_trading_days_data(self, days_back: int = 30) -> None:
         """Fetch historical data for noise band calculation."""
-        end_date = datetime.now(self.tz).strftime("%Y-%m-%d") - timedelta(days=1)
+        end_date = (datetime.now(self.tz) - timedelta(days=1)).strftime("%Y-%m-%d")
 
         # TODO: Need to fetch last k trading days (this just does raw days)
         start_date = (datetime.now(self.tz) - timedelta(days=days_back)).strftime("%Y-%m-%d")
