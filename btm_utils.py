@@ -184,40 +184,28 @@ def compute_sigma_series(df: pd.DataFrame, lookback_days: int) -> pd.Series:
         t = ts.strftime("%H:%M")
         sigma.append(pivot_sigma.loc[ts.normalize(), t])
 
-    return pd.Series(sigma, index=df.index, name="sigma")
+    return pd.Series(sigma, index=df.index, name="sigma")    
 
 
 def compute_noise_bands(
-    df: pd.DataFrame,
-    lookback_days: int,
-    vm: float,
+    today_open: float,
+    yesterday_close: float,
+    move_from_open_on_historical_data: pd.Series,
+    vm: float = 1.0,
     gap_adjustment: bool = True,
 ) -> pd.DataFrame:
-    sigma = compute_sigma_series(df, lookback_days) * vm
-
-    # Build reference price per minute: max(Open_t, Close_{t-1}) and min(Open_t, Close_{t-1}) as per paper
-    daily = compute_daily_ohlcv(df)
-    day_open = df.groupby(df.index.date)["open"].first()
-    day_open = pd.Series(day_open.values, index=pd.to_datetime(day_open.index).tz_localize("America/New_York"))
-    day_close_prev = daily["close"].shift(1)
-
-    open_ref = day_open.reindex(df.index.normalize()).values
-    close_prev_ref = day_close_prev.reindex(df.index.normalize()).values
-
     if gap_adjustment:
-        upper_base = np.maximum(open_ref, close_prev_ref)
-        lower_base = np.minimum(open_ref, close_prev_ref)
+        upper_base = np.maximum(today_open, yesterday_close)
+        lower_base = np.minimum(today_open, yesterday_close)
     else:
-        upper_base = open_ref
-        lower_base = open_ref 
-
-    upper = upper_base * (1.0 + sigma.values)
-    lower = lower_base * (1.0 - sigma.values)
-
-    out = pd.DataFrame(index=df.index)
+        upper_base = today_open
+        lower_base = today_open
+    upper = upper_base * (1.0 + move_from_open_on_historical_data.values * vm)
+    lower = lower_base * (1.0 - move_from_open_on_historical_data.values * vm)
+    out = pd.DataFrame(index=move_from_open_on_historical_data.index)
     out["UB"] = upper
     out["LB"] = lower
-    out["sigma"] = sigma.values
+    out["sigma"] = move_from_open_on_historical_data.values
     return out
 
 
@@ -373,7 +361,7 @@ class SharedQuoteData:
         def run_stream():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            self.wss_client.subscribe_bars(self.quote_data_handler, self.symbols)
+            self.wss_client.subscribe_bars(self.quote_data_handler, *self.symbols)
             self.wss_client.run()
 
         Thread(target=run_stream, daemon=True).start()

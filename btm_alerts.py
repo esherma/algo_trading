@@ -17,7 +17,7 @@ import pytz
 from dotenv import load_dotenv
 
 # Local imports
-from btm_utils import TradingConfig, compute_noise_bands, compute_daily_ohlcv, fetch_intraday_bars, get_alpaca_client
+from btm_utils import TradingConfig, compute_noise_bands, fetch_intraday_bars, get_alpaca_client, compute_sigma_series
 from trading_config import get_config
 
 
@@ -224,8 +224,14 @@ class BTMAlertSystem:
         if not morning:
             client = get_alpaca_client()
             config = get_config()
-            self.historical_data = fetch_intraday_bars(client, symbol=config.symbol, start=today - timedelta(days=30))
-            self.noise_bands = compute_noise_bands(self.historical_data[self.historical_data.index.date < today], lookback_days=config.lookback_days, vm=config.volatility_multiplier, gap_adjustment=config.use_gap_adjustment)
+            self.historical_data = fetch_intraday_bars(client, symbol=config.symbol, start=today - timedelta(days=config.lookback_days))
+            self.noise_bands = compute_noise_bands(
+                today_open=self.historical_data[self.historical_data.index.date == today]["open"].iloc[0],
+                yesterday_close=self.historical_data[self.historical_data.index.date != today]["close"].iloc[-1],
+                move_from_open_on_historical_data=compute_sigma_series(self.historical_data, config.lookback_days),
+                vm=config.volatility_multiplier,
+                gap_adjustment=config.use_gap_adjustment
+            )
 
         last_trading_day = self.noise_bands.iloc[-1].name.date()
         last_trading_day_bands = self.noise_bands[self.noise_bands.index.date == last_trading_day]

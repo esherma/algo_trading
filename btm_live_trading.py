@@ -17,7 +17,7 @@ from alpaca.data.requests import StockLatestQuoteRequest
 
 # Local imports
 from btm_utils import (
-    TradingConfig, get_alpaca_client, fetch_intraday_bars,
+    TradingConfig, compute_sigma_series, get_alpaca_client, fetch_intraday_bars,
     compute_noise_bands, compute_daily_ohlcv, SharedQuoteData
 )
 from trading_config import get_config, print_config_summary
@@ -82,9 +82,11 @@ class BTMLiveTrader:
             "account_blocked": account.account_blocked
         }
     
-    def fetch_historical_data(self, days_back: int = 30) -> None:
+    def fetch_look_back_trading_days_data(self, days_back: int = 30) -> None:
         """Fetch historical data for noise band calculation."""
-        end_date = datetime.now(self.tz).strftime("%Y-%m-%d")
+        end_date = datetime.now(self.tz).strftime("%Y-%m-%d") - timedelta(days=1)
+
+        # TODO: Need to fetch last k trading days (this just does raw days)
         start_date = (datetime.now(self.tz) - timedelta(days=days_back)).strftime("%Y-%m-%d")
         
         print(f"Fetching historical data from {start_date} to {end_date}...")
@@ -98,21 +100,16 @@ class BTMLiveTrader:
         
         print(f"Fetched {len(self.historical_data)} bars of historical data")
     
-    def calculate_noise_bands(self) -> None:
+    def calculate_move_from_open_on_historical_data(self) -> None:
         """Calculate noise bands from historical data."""
         if self.historical_data is None:
             raise RuntimeError("Historical data not available. Call fetch_historical_data() first.")
         
-        print("Calculating noise bands...")
+        print("Calculating move from open on historical data...")
+
+        self.move_from_open_on_historical_data = compute_sigma_series(self.historical_data, self.config.lookback_days)
         
-        self.noise_bands = compute_noise_bands(
-            df=self.historical_data,
-            lookback_days=self.config.lookback_days,
-            vm=self.config.volatility_multiplier,
-            gap_adjustment=self.config.use_gap_adjustment
-        )
-        
-        print("Noise bands calculated successfully")
+        print("Move from open on historical data calculated successfully")
     
     def calculate_daily_leverage_and_tickers(self) -> None:
         """
@@ -448,8 +445,22 @@ class BTMLiveTrader:
         trading_cutoff = datetime.now(self.tz).replace(hour=15, minute=49, second=30, microsecond=0)
         
         # Initial setup
-        self.fetch_historical_data()
-        self.calculate_noise_bands()
+        
+        self.fetch_look_back_trading_days_data(days_back=self.config.lookback_days)
+
+        while shared_data.get(self.config.symbol) is None:
+            await asyncio.sleep(10)
+
+        self.day_open = shared_data.get(self.config.symbol)['open']
+        self.yesterday_close = self.historical_data.iloc[-1]["close"]
+
+        self.calculate_move_from_open_on_historical_data()
+
+        self.noise_bands = compute_noise_bands(
+            today_open = self.day_open,
+            yesterday_close = self.yesterday_close,
+            move_from_open_on_historical_data=self.move_from_open_on_historical_data
+        )
         
         # Calculate daily leverage and tickers (fixed for the day)
         self.calculate_daily_leverage_and_tickers()
@@ -489,7 +500,7 @@ class BTMLiveTrader:
                     print("End of day - closing all positions")
                     self.close_all_positions()
 
-                    asyncio.sleep(900)
+                    await asyncio.sleep(900)
                     
                     # Update closing AUM and send evening digest
                     closing_account_info = self.get_account_info()
