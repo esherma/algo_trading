@@ -67,9 +67,76 @@ class BTMAlertSystem:
         self.opening_aum = opening_aum
         self.closing_aum = closing_aum
     
+    def get_noise_bands_at_times(self) -> List[Dict[str, Any]]:
+        """Extract noise band values at specific times throughout the trading day."""
+        if self.noise_bands is None or len(self.noise_bands) == 0:
+            return []
+        
+        # Get the date from the noise bands data
+        bands_date = self.noise_bands.index[0].date()
+        
+        # Define the times we want to extract (every 30 minutes from 10am to 3:30pm, plus 3:50pm)
+        target_times = []
+        for hour in range(10, 16):  # 10am to 3pm
+            target_times.append(f"{hour:02d}:00")
+            if hour < 15:  # Don't add 3:30 twice
+                target_times.append(f"{hour:02d}:30")
+        target_times.append("15:30")  # 3:30pm
+        target_times.append("15:50")  # 3:50pm
+        
+        bands_data = []
+        
+        for time_str in target_times:
+            hour, minute = map(int, time_str.split(':'))
+            
+            # Create a timestamp for this time
+            target_timestamp = pd.Timestamp.combine(bands_date, pd.Timestamp.time(pd.Timestamp(f"{hour:02d}:{minute:02d}:00"))).tz_localize(self.tz)
+            
+            # Try to get the exact timestamp, or find the closest one
+            if target_timestamp in self.noise_bands.index:
+                # Exact match found
+                bands_data.append({
+                    'time': time_str,
+                    'upper_bound': self.noise_bands.loc[target_timestamp, 'UB'],
+                    'lower_bound': self.noise_bands.loc[target_timestamp, 'LB']
+                })
+            else:
+                # Find the closest time within 5 minutes
+                time_diffs = abs(self.noise_bands.index - target_timestamp)
+                if len(time_diffs) > 0:
+                    closest_idx = time_diffs.argmin()
+                    closest_time = self.noise_bands.index[closest_idx]
+                    
+                    # Only include if the time difference is reasonable (within 5 minutes)
+                    if abs((closest_time - target_timestamp).total_seconds()) <= 300:  # 5 minutes
+                        bands_data.append({
+                            'time': time_str,
+                            'upper_bound': self.noise_bands.loc[closest_time, 'UB'],
+                            'lower_bound': self.noise_bands.loc[closest_time, 'LB']
+                        })
+        
+        return bands_data
+    
     def create_morning_alert(self) -> str:
         """Create the morning alert email content."""
         today = datetime.now(self.tz).strftime("%Y-%m-%d")
+        
+        # Get noise bands data for the table
+        bands_data = self.get_noise_bands_at_times()
+        
+        # Create the noise bands table HTML
+        bands_table_html = ""
+        if bands_data:
+            for band in bands_data:
+                bands_table_html += f"""
+                <tr>
+                    <td>{band['time']}</td>
+                    <td>${band['upper_bound']:.2f}</td>
+                    <td>${band['lower_bound']:.2f}</td>
+                </tr>
+                """
+        else:
+            bands_table_html = "<tr><td colspan='3'>Noise bands data not available</td></tr>"
         
         html_content = f"""
         <html>
@@ -80,6 +147,10 @@ class BTMAlertSystem:
                 .metric {{ margin: 10px 0; padding: 10px; background-color: #f9f9f9; border-left: 4px solid #007bff; }}
                 .ticker {{ font-weight: bold; color: #28a745; }}
                 .warning {{ color: #dc3545; }}
+                table {{ border-collapse: collapse; width: 100%; margin: 10px 0; }}
+                th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+                th {{ background-color: #f2f2f2; }}
+                .bands-table {{ font-size: 12px; }}
             </style>
         </head>
         <body>
@@ -99,6 +170,22 @@ class BTMAlertSystem:
                 <h3>🎯 Trading Tickers for Today</h3>
                 <p><strong>Long Position Ticker:</strong> <span class="ticker">{self.in_play_tickers['long_ticker']}</span></p>
                 <p><strong>Short Position Ticker:</strong> <span class="ticker">{self.in_play_tickers['short_ticker']}</span></p>
+            </div>
+            
+            <div class="metric">
+                <h3>📈 Noise Bands Schedule</h3>
+                <table class="bands-table">
+                    <thead>
+                        <tr>
+                            <th>Time (ET)</th>
+                            <th>Upper Bound</th>
+                            <th>Lower Bound</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {bands_table_html}
+                    </tbody>
+                </table>
             </div>
             
             <div class="metric">
@@ -372,14 +459,14 @@ class BTMAlertSystem:
         html_content = self.create_morning_alert()
         
         # Create and attach noise bands plot
-        plot_filename = self.create_noise_bands_plot(include_trades=False)
-        print('Saving plot to', plot_filename)
+        # plot_filename = self.create_noise_bands_plot(include_trades=False)
+        # print('Saving plot to', plot_filename)
         
-        success = self.send_email(subject, html_content, plot_filename)
+        success = self.send_email(subject, html_content) #, plot_filename)
         
         # Clean up plot file
-        if plot_filename and os.path.exists(plot_filename):
-            os.remove(plot_filename)
+        # if plot_filename and os.path.exists(plot_filename):
+        #     os.remove(plot_filename)
         
         return success
     
