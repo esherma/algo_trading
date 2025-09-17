@@ -365,4 +365,13 @@ class SharedQuoteData:
             self.wss_client.subscribe_bars(self.quote_data_handler, *self.symbols)
             self.wss_client.run()
 
-        Thread(target=run_stream, daemon=True).start()
+        self._stream_thread = Thread(target=run_stream, daemon=True)
+        self._stream_thread.start()
+
+    def stop(self):
+        """Stops the WebSocket stream."""
+        # Alpaca's StockDataStream provides a stop() method to close the websocket connection.
+        self.wss_client.stop()
+        # Optionally, join the thread if you want to wait for it to finish
+        if hasattr(self, "_stream_thread"):
+            self._stream_thread.join(timeout=5)

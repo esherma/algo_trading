@@ -461,6 +461,11 @@ class BTMLiveTrader:
             yesterday_close = self.yesterday_close,
             move_from_open_on_historical_data=self.move_from_open_on_historical_data
         )
+
+        print('SPY day open', self.day_open)
+        print('SPY yesterday close', self.yesterday_close)
+        print('SPY move from open on historical data', self.move_from_open_on_historical_data)
+        print('SPY noise bands', self.noise_bands)
         
         # Calculate daily leverage and tickers (fixed for the day)
         self.calculate_daily_leverage_and_tickers()
@@ -552,7 +557,7 @@ class BTMLiveTrader:
             except Exception as e:
                 print(f"Error in trading loop: {e}")
                 await asyncio.sleep(5)  # Wait 5 seconds before retrying
-        
+        shared_data.stop()
         print("Trading loop ended")
 
 
