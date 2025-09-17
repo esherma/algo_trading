@@ -349,6 +349,7 @@ class SharedQuoteData:
         self.update(data)
 
     def update(self, data):
+        data = dict(data)
         with self.lock:
             self.latest_data[data["symbol"]] = data
 
