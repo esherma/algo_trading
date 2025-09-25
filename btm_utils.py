@@ -154,37 +154,64 @@ def compute_daily_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_sigma_series(df: pd.DataFrame, lookback_days: int) -> pd.Series:
-    # sigma_t,9:30-HH:MM = average of abs(move from open) over previous N days at same HH:MM
-    # Create columns for HH:MM key
-    hhmm = df.index.strftime("%H:%M")
-    open_by_day = df.groupby(df.index.date)["open"].first()
-    open_map = pd.Series(open_by_day.values, index=pd.to_datetime(open_by_day.index).tz_localize("America/New_York")).reindex(
-        df.index.normalize()
-    )
-    move = (df["close"] / open_map.values - 1.0).abs()
-
-    # For each HH:MM group, compute rolling mean of last N days for that time key
-    sigma = []
-    # Build a pivot: rows=day, cols=HH:MM, value=abs move
-    day_index = df.index.normalize().unique()
-    times = sorted(pd.unique(hhmm))
-    pivot = pd.DataFrame(index=day_index, columns=times, dtype=float)
-    for t in times:
-        mask = hhmm == t
-        # aggregate by day: use last value at HH:MM for the day (minute close)
-        s = move[mask]
-        s_by_day = s.groupby(s.index.normalize()).last()
-        pivot.loc[s_by_day.index, t] = s_by_day.values
-
-    # rolling mean over past N days per time column
-    pivot_sigma = pivot.rolling(window=lookback_days).mean()
-
-    # map back to original minute index
-    for idx, ts in enumerate(df.index):
-        t = ts.strftime("%H:%M")
-        sigma.append(pivot_sigma.loc[ts.normalize(), t])
-
-    return pd.Series(sigma, index=df.index, name="sigma")    
+    """
+    Calculate sigma_t,9:30-HH:MM = average of abs(move from open) over previous N days at same HH:MM
+    
+    Where t is the day after the data ends, and we calculate the average move for each minute
+    of the trading day (9:30-16:00) based on historical data.
+    
+    Returns: Series with 390 elements (one for each minute 9:30-16:00) with time as index
+    """
+    # Get unique days and sort them
+    unique_days = sorted(df.index.normalize().unique())
+    
+    # Get the most recent lookback_days
+    recent_days = unique_days[-lookback_days:]
+    
+    # Create time index for 9:30-16:00 (390 minutes)
+    start_time = pd.Timestamp("09:30").time()
+    end_time = pd.Timestamp("16:00").time()
+    
+    # Generate all minute times from 9:30 to 16:00
+    time_index = []
+    current_time = start_time
+    while current_time <= end_time:
+        time_index.append(current_time.strftime("%H:%M"))
+        # Add 1 minute
+        current_dt = pd.Timestamp.combine(pd.Timestamp.today().date(), current_time)
+        current_dt += pd.Timedelta(minutes=1)
+        current_time = current_dt.time()
+    
+    # Initialize sigma series with time index
+    sigma_series = pd.Series(index=time_index, dtype=float, name="sigma")
+    
+    # For each time slot, calculate average move across recent days
+    for time_str in time_index:
+        moves_for_time = []
+        
+        for day in recent_days:
+            # Get data for this specific day and time
+            day_data = df[df.index.normalize() == day]
+            time_data = day_data[day_data.index.strftime("%H:%M") == time_str]
+            
+            if len(time_data) > 0:
+                # Get opening price for this day (first price at 9:30)
+                day_open = day_data[day_data.index.strftime("%H:%M") == "09:30"]["open"].iloc[0]
+                
+                # Get close price at this specific time
+                time_close = time_data["close"].iloc[0]
+                
+                # Calculate move: |(Close / Open) - 1|
+                move = abs((time_close / day_open) - 1.0)
+                moves_for_time.append(move)
+        
+        # Calculate average move for this time slot
+        if moves_for_time:
+            sigma_series[time_str] = sum(moves_for_time) / len(moves_for_time)
+        else:
+            sigma_series[time_str] = 0.0
+    
+    return sigma_series    
 
 
 def compute_noise_bands(

@@ -101,7 +101,7 @@ class BTMLiveTrader:
         print(f"Fetched {len(self.historical_data)} bars of historical data")
     
     def calculate_move_from_open_on_historical_data(self) -> None:
-        """Calculate noise bands from historical data."""
+        """Calculate move from open on from historical data."""
         if self.historical_data is None:
             raise RuntimeError("Historical data not available. Call fetch_historical_data() first.")
         
@@ -233,24 +233,12 @@ class BTMLiveTrader:
             market_data = dict(market_data)
         
         current_price = market_data["close"]
-        current_time = pd.Timestamp(market_data["timestamp"]).astimezone(self.config.timezone) ## THIS IS IN UTC
-        
-        # Find the corresponding noise band values based on last trading day's data
-        # We need to find the closest time in our historical data
-        last_trading_day = self.noise_bands.iloc[-1].name.date()
-        
-        # Get today's data from historical data
-        date_mask = self.noise_bands.index.date == last_trading_day
-        last_trading_day_noise_bands_data = self.noise_bands[date_mask]
-        
-        if len(last_trading_day_noise_bands_data) == 0:
-            print("No data for today available.")
-            return None
+        current_time = pd.Timestamp(market_data["timestamp"]).astimezone(self.config.timezone)
         
         # Find the closest time to current time
-        time_diff = abs(last_trading_day_noise_bands_data.index - current_time)
+        time_diff = abs(self.noise_bands.index - current_time.time)
         closest_idx = time_diff.argmin()
-        closest_time = last_trading_day_noise_bands_data.index[closest_idx]
+        closest_time = self.noise_bands.index[closest_idx]
         
         # Get noise band values for this time
         if closest_time in self.noise_bands.index:
@@ -446,15 +434,17 @@ class BTMLiveTrader:
         
         # Initial setup
         
-        self.fetch_look_back_trading_days_data(days_back=self.config.lookback_days)
+        self.fetch_look_back_trading_days_data(days_back=2 * self.config.lookback_days)
+
+        self.calculate_move_from_open_on_historical_data()
+
+        print(self.move_from_open_on_historical_data)
 
         while shared_data.get(self.config.symbol) is None:
             await asyncio.sleep(10)
 
         self.day_open = shared_data.get(self.config.symbol)['open']
         self.yesterday_close = self.historical_data.iloc[-1]["close"]
-
-        self.calculate_move_from_open_on_historical_data()
 
         self.noise_bands = compute_noise_bands(
             today_open = self.day_open,

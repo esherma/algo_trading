@@ -73,7 +73,7 @@ class BTMAlertSystem:
             return []
         
         # Get the date from the noise bands data
-        bands_date = self.noise_bands.index[0].date()
+        bands_date = datetime.now().date()
         
         # Define the times we want to extract (every 30 minutes from 10am to 3:30pm, plus 3:50pm)
         target_times = []
@@ -93,27 +93,15 @@ class BTMAlertSystem:
             target_timestamp = pd.Timestamp.combine(bands_date, pd.Timestamp.time(pd.Timestamp(f"{hour:02d}:{minute:02d}:00"))).tz_localize(self.tz)
             
             # Try to get the exact timestamp, or find the closest one
-            if target_timestamp in self.noise_bands.index:
+            if target_timestamp.time().strftime("%H:%M") in self.noise_bands.index:
                 # Exact match found
                 bands_data.append({
                     'time': time_str,
-                    'upper_bound': self.noise_bands.loc[target_timestamp, 'UB'],
-                    'lower_bound': self.noise_bands.loc[target_timestamp, 'LB']
+                    'upper_bound': self.noise_bands.loc[target_timestamp.time().strftime("%H:%M"), 'UB'],
+                    'lower_bound': self.noise_bands.loc[target_timestamp.time().strftime("%H:%M"), 'LB']
                 })
             else:
-                # Find the closest time within 5 minutes
-                time_diffs = abs(self.noise_bands.index - target_timestamp)
-                if len(time_diffs) > 0:
-                    closest_idx = time_diffs.argmin()
-                    closest_time = self.noise_bands.index[closest_idx]
-                    
-                    # Only include if the time difference is reasonable (within 5 minutes)
-                    if abs((closest_time - target_timestamp).total_seconds()) <= 300:  # 5 minutes
-                        bands_data.append({
-                            'time': time_str,
-                            'upper_bound': self.noise_bands.loc[closest_time, 'UB'],
-                            'lower_bound': self.noise_bands.loc[closest_time, 'LB']
-                        })
+                raise RuntimeError("noise bands be broken!!!")
         
         return bands_data
     
@@ -303,99 +291,99 @@ class BTMAlertSystem:
     
     def create_noise_bands_plot(self, morning: bool=True, include_trades: bool = False) -> str:
         """Create a noise bands plot and save it to a file."""
-        today = pd.Timestamp.now(self.tz).date()
+        # today = pd.Timestamp.now(self.tz).date()
 
         if morning and (self.historical_data is None or self.noise_bands is None):
             return None
 
-        if not morning:
-            client = get_alpaca_client()
-            config = get_config()
-            self.historical_data = fetch_intraday_bars(client, symbol=config.symbol, start=today - timedelta(days=config.lookback_days))
-            self.noise_bands = compute_noise_bands(
-                today_open=self.historical_data[self.historical_data.index.date == today]["open"].iloc[0],
-                yesterday_close=self.historical_data[self.historical_data.index.date != today]["close"].iloc[-1],
-                move_from_open_on_historical_data=compute_sigma_series(self.historical_data, config.lookback_days),
-                vm=config.volatility_multiplier,
-                gap_adjustment=config.use_gap_adjustment
-            )
+        # if not morning:
+        #     client = get_alpaca_client()
+        #     config = get_config()
+        #     self.historical_data = fetch_intraday_bars(client, symbol=config.symbol, start=today - timedelta(days=config.lookback_days))
+        #     self.noise_bands = compute_noise_bands(
+        #         today_open=self.historical_data[self.historical_data.index.date == today]["open"].iloc[0],
+        #         yesterday_close=self.historical_data[self.historical_data.index.date != today]["close"].iloc[-1],
+        #         move_from_open_on_historical_data=compute_sigma_series(self.historical_data, config.lookback_days),
+        #         vm=config.volatility_multiplier,
+        #         gap_adjustment=config.use_gap_adjustment
+        #     )
 
-        last_trading_day = self.noise_bands.iloc[-1].name.date()
-        last_trading_day_bands = self.noise_bands[self.noise_bands.index.date == last_trading_day]
+        # last_trading_day = self.noise_bands.iloc[-1].name.date()
+        # last_trading_day_bands = self.noise_bands[self.noise_bands.index.date == last_trading_day]
         
-        if len(last_trading_day_bands) == 0:
-            return None
+        # if len(last_trading_day_bands) == 0:
+        #     return None
         
         # Create the plot
         fig, ax = plt.subplots(figsize=(12, 8))
         
-        # Plot price
-        if not morning:
-            today_mask = self.historical_data.index.date == today
+        # # Plot price
+        # if not morning:
+        #     today_mask = self.historical_data.index.date == today
 
-            # Recast historical_data[today_mask].index as same date as last_trading_day
-            recast_index = [
-                pd.Timestamp.combine(last_trading_day, t).tz_localize(self.tz)
-                for t in self.historical_data[today_mask].index.time
-            ]
-            complete_trading_day_data = self.historical_data[today_mask].copy()
-            complete_trading_day_data.insert(0, column = 'ts', value = recast_index)
-            complete_trading_day_data.set_index(keys='ts', drop=True, inplace=True)
-            print(complete_trading_day_data.index)
-            ax.plot(complete_trading_day_data.index, complete_trading_day_data['close'], label='SPY Price TODAY', color='black', linewidth=2)
+        #     # Recast historical_data[today_mask].index as same date as last_trading_day
+        #     recast_index = [
+        #         pd.Timestamp.combine(last_trading_day, t).tz_localize(self.tz)
+        #         for t in self.historical_data[today_mask].index.time
+        #     ]
+        #     complete_trading_day_data = self.historical_data[today_mask].copy()
+        #     complete_trading_day_data.insert(0, column = 'ts', value = recast_index)
+        #     complete_trading_day_data.set_index(keys='ts', drop=True, inplace=True)
+        #     print(complete_trading_day_data.index)
+        #     ax.plot(complete_trading_day_data.index, complete_trading_day_data['close'], label='SPY Price TODAY', color='black', linewidth=2)
         
-        print(last_trading_day_bands.index)
+        # print(last_trading_day_bands.index)
 
         # Plot noise bands
-        ax.plot(last_trading_day_bands.index, last_trading_day_bands['UB'], label='Upper Band', color='red', linestyle='--', alpha=0.7)
-        ax.plot(last_trading_day_bands.index, last_trading_day_bands['LB'], label='Lower Band', color='red', linestyle='--', alpha=0.7)
+        ax.plot(self.noise_bands.index, self.noise_bands['UB'], label='Upper Band', color='red', linestyle='--', alpha=0.7)
+        ax.plot(self.noise_bands.index, self.noise_bands['LB'], label='Lower Band', color='red', linestyle='--', alpha=0.7)
         
         # Fill the bands area
-        ax.fill_between(last_trading_day_bands.index, last_trading_day_bands['LB'], last_trading_day_bands['UB'], 
+        ax.fill_between(self.noise_bands.index, self.noise_bands['LB'], self.noise_bands['UB'], 
                        alpha=0.1, color='red', label='Noise Bands')
         
-        # Add trade annotations if requested
-        if include_trades and self.daily_trades:
-            for trade in self.daily_trades:
-                trade_time = trade.get('timestamp')
-                if trade_time and hasattr(trade_time, 'tz_localize'):
-                    if trade_time.tz is None:
-                        trade_time = trade_time.tz_localize(self.tz)
-                    elif trade_time.tz != self.tz:
-                        trade_time = trade_time.tz_convert(self.tz)
+        # # Add trade annotations if requested
+        # if include_trades and self.daily_trades:
+        #     for trade in self.daily_trades:
+        #         trade_time = trade.get('timestamp')
+        #         if trade_time and hasattr(trade_time, 'tz_localize'):
+        #             if trade_time.tz is None:
+        #                 trade_time = trade_time.tz_localize(self.tz)
+        #             elif trade_time.tz != self.tz:
+        #                 trade_time = trade_time.tz_convert(self.tz)
                     
-                    # Find closest time in today's data
-                    time_diff = abs(self.historical_data.index - trade_time)
-                    if len(time_diff) > 0:
-                        closest_idx = time_diff.argmin()
-                        closest_time = self.historical_data.index[closest_idx]
-                        closest_time_plotting = self.historical_data.index[closest_idx].replace(year=last_trading_day.year, month=last_trading_day.month, day=last_trading_day.day)
-                        price_at_time = self.historical_data.loc[closest_time, 'close']
+        #             # Find closest time in today's data
+        #             time_diff = abs(self.historical_data.index - trade_time)
+        #             if len(time_diff) > 0:
+        #                 closest_idx = time_diff.argmin()
+        #                 closest_time = self.historical_data.index[closest_idx]
+        #                 closest_time_plotting = self.historical_data.index[closest_idx].replace(year=last_trading_day.year, month=last_trading_day.month, day=last_trading_day.day)
+        #                 price_at_time = self.historical_data.loc[closest_time, 'close']
                         
-                        # Plot trade marker
-                        action = trade.get('action', 'Unknown')
-                        if 'open' in action.lower():
-                            marker = '^'
-                            color = 'green'
-                            label = 'Position Opened'
-                        elif 'close' in action.lower():
-                            marker = 'v'
-                            color = 'red'
-                            label = 'Position Closed'
-                        else:
-                            marker = 'o'
-                            color = 'blue'
-                            label = 'Trade'
+        #                 # Plot trade marker
+        #                 action = trade.get('action', 'Unknown')
+        #                 if 'open' in action.lower():
+        #                     marker = '^'
+        #                     color = 'green'
+        #                     label = 'Position Opened'
+        #                 elif 'close' in action.lower():
+        #                     marker = 'v'
+        #                     color = 'red'
+        #                     label = 'Position Closed'
+        #                 else:
+        #                     marker = 'o'
+        #                     color = 'blue'
+        #                     label = 'Trade'
                         
-                        ax.scatter(closest_time_plotting, price_at_time, marker=marker, s=100, 
-                                 color=color, zorder=5, label=label)
+        #                 ax.scatter(closest_time_plotting, price_at_time, marker=marker, s=100, 
+        #                          color=color, zorder=5, label=label)
                         
-                        # Add annotation
-                        ax.annotate(f"{trade.get('ticker', 'Unknown')}\n{trade.get('shares', 0)} shares", 
-                                  (closest_time_plotting, price_at_time), 
-                                  xytext=(10, 10), textcoords='offset points',
-                                  bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7),
-                                  fontsize=8)
+        #                 # Add annotation
+        #                 ax.annotate(f"{trade.get('ticker', 'Unknown')}\n{trade.get('shares', 0)} shares", 
+        #                           (closest_time_plotting, price_at_time), 
+        #                           xytext=(10, 10), textcoords='offset points',
+        #                           bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7),
+        #                           fontsize=8)
         
         # Format the plot
         ax.set_title(f'BTM Noise Bands - {datetime.now().date().strftime("%Y-%m-%d")}', fontsize=14, fontweight='bold')
@@ -459,14 +447,14 @@ class BTMAlertSystem:
         html_content = self.create_morning_alert()
         
         # Create and attach noise bands plot
-        # plot_filename = self.create_noise_bands_plot(include_trades=False)
-        # print('Saving plot to', plot_filename)
+        plot_filename = self.create_noise_bands_plot(include_trades=False)
+        print('Saving plot to', plot_filename)
         
         success = self.send_email(subject, html_content) #, plot_filename)
         
         # Clean up plot file
-        # if plot_filename and os.path.exists(plot_filename):
-        #     os.remove(plot_filename)
+        if plot_filename and os.path.exists(plot_filename):
+            os.remove(plot_filename)
         
         return success
     
