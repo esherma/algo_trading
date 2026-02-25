@@ -173,26 +173,35 @@ class TradingState:
 
 def wait_for_open_bar(data_client, symbol: str) -> float:
     """
-    Poll the snapshot endpoint until today's open price is available.
+    Poll the snapshot endpoint until the 09:30 regular-session bar is available.
 
-    The snapshot endpoint is real-time and returns daily_bar.open once the
-    first trade of the session has printed — typically within seconds of 09:30.
+    Uses minute_bar.open (not daily_bar.open) to get the true session open.
+    On SIP feeds daily_bar.open reflects the 4 AM pre-market first print;
+    checking minute_bar.timestamp >= 09:30 guarantees we have the regular-
+    session open regardless of feed type.
     Returns today's opening price.
     """
-    log.info("Waiting for market open …")
+    import pandas as pd
+
+    log.info("Waiting for 09:30 bar …")
+    session_open = pd.Timestamp("09:30").time()
 
     for attempt in range(60):           # give it up to 5 minutes
         try:
             snap = fetch_snapshot(data_client, symbol)
-            open_price = snap["today_open"]
-            if open_price and open_price > 0:
-                log.info("Market open: %s open = $%.2f", symbol, open_price)
+            ts_ny = pd.Timestamp(snap["timestamp"]).tz_convert(NY_TZ)
+            if ts_ny.time() >= session_open:
+                open_price = snap["minute_open"]
+                log.info(
+                    "09:30 bar confirmed: %s open = $%.2f  (bar ts %s)",
+                    symbol, open_price, ts_ny.strftime("%H:%M"),
+                )
                 return open_price
         except Exception as exc:
-            log.debug("Snapshot attempt %d failed: %s", attempt + 1, exc)
+            log.debug("Snapshot attempt %d: %s", attempt + 1, exc)
         time.sleep(5)
 
-    raise RuntimeError(f"Market open for {symbol} not detected after 5 minutes.")
+    raise RuntimeError(f"09:30 bar for {symbol} not detected after 5 minutes.")
 
 
 def compute_day_state(
@@ -358,6 +367,134 @@ def handle_decision(
 
 
 # ---------------------------------------------------------------------------
+# Preflight check (runs any time, never submits orders)
+# ---------------------------------------------------------------------------
+
+def run_preflight(cfg: BTMConfig) -> None:
+    """
+    Verify end-to-end connectivity and configuration without trading.
+
+    Checks (in order):
+      1. Alpaca client authentication (data + trading)
+      2. Market clock reachability
+      3. Historical minute-bar download
+      4. Account info / portfolio value
+      5. Real-time snapshot (warns gracefully if market is closed)
+      6. Sigma + band computation
+      7. Leverage / ETF / share-sizing
+      8. Chart generation
+      9. Morning email delivery
+
+    Safe to run at any time of day on any day of the week.
+    """
+    import pandas as pd
+
+    load_dotenv()
+    log.info("=== BTM Preflight Check  session=%s  symbol=%s ===",
+             cfg.session, cfg.symbol)
+
+    # ── 1. Clients ──────────────────────────────────────────────────────────
+    data_client    = make_data_client(cfg.session)
+    trading_client = make_trading_client(cfg.session)
+    log.info("[OK] Alpaca clients created")
+
+    # ── 2. Market clock ──────────────────────────────────────────────────────
+    clock = get_market_clock(trading_client)
+    log.info("[OK] Market clock  is_open=%s  next_open=%s",
+             clock["is_open"],
+             clock["next_open"].strftime("%Y-%m-%d %H:%M %Z"))
+
+    # ── 3. Historical data ───────────────────────────────────────────────────
+    hist_start = (date.today() - timedelta(days=30)).strftime("%Y-%m-%d")
+    hist_end   = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+    log.info("Fetching historical bars %s → %s …", hist_start, hist_end)
+    hist_df = fetch_minute_bars(data_client, cfg.symbol, hist_start, hist_end)
+    if hist_df.empty:
+        raise RuntimeError("No historical data returned — check symbol and credentials.")
+    n_days = len(set(hist_df.index.date))
+    log.info("[OK] Historical data  %d bars  %d trading days", len(hist_df), n_days)
+
+    # ── 4. Account ───────────────────────────────────────────────────────────
+    acct = get_account_info(trading_client)
+    log.info("[OK] Account  portfolio_value=$%.2f  cash=$%.2f",
+             acct["portfolio_value"], acct["cash"])
+
+    # ── 5. Snapshot ──────────────────────────────────────────────────────────
+    snap = None
+    try:
+        snap = fetch_snapshot(data_client, cfg.symbol)
+        ts_ny = pd.Timestamp(snap["timestamp"]).tz_convert(NY_TZ)
+        log.info("[OK] Snapshot  price=$%.2f  vwap=$%.2f  bar_ts=%s",
+                 snap["price"], snap["vwap"], ts_ny.strftime("%H:%M:%S"))
+    except Exception as exc:
+        log.warning("[--] Snapshot unavailable (market closed?): %s", exc)
+
+    # ── 6. Bands ─────────────────────────────────────────────────────────────
+    yesterday_close = float(hist_df["close"].iloc[-1])
+    # Use last snapshot price as a stand-in for today's open when available;
+    # fall back to yesterday's close when called outside market hours.
+    today_open_est = snap["price"] if snap else yesterday_close
+
+    sigma_series = compute_sigma_for_today(hist_df, cfg.lookback_days)
+    bands_df     = compute_bands_for_today(
+        sigma_series, today_open_est, yesterday_close, cfg.vm
+    )
+    log.info("[OK] Bands computed  %d decision times  "
+             "UB@10:00=$%.2f  LB@10:00=$%.2f",
+             len(bands_df),
+             float(bands_df["UB"].iloc[0]),
+             float(bands_df["LB"].iloc[0]))
+
+    # ── 7. Sizing ─────────────────────────────────────────────────────────────
+    daily_close    = hist_df.groupby(hist_df.index.date)["close"].last()
+    daily_close_ts = pd.Series(
+        daily_close.values,
+        index=pd.to_datetime(daily_close.index).tz_localize(NY_TZ_STR),
+    )
+    vol      = compute_daily_vol(daily_close_ts, cfg.lookback_days)
+    leverage = min(cfg.leverage_cap, cfg.target_daily_vol / max(vol, 1e-6))
+    long_etf, short_etf, etf_mult = select_etfs(leverage)
+    shares   = compute_etf_shares(
+        acct["portfolio_value"], leverage, today_open_est, etf_mult
+    )
+    log.info("[OK] Sizing  vol=%.2f%%  leverage=%.2f×  long=%s  short=%s  shares=%d",
+             vol * 100, leverage, long_etf, short_etf, shares)
+
+    # ── 8. Chart ──────────────────────────────────────────────────────────────
+    from btm.chart import plot_morning_bands
+    today_str = date.today().strftime("%Y-%m-%d")
+    png = plot_morning_bands(
+        bands_df       = bands_df,
+        today_open     = today_open_est,
+        yesterday_close= yesterday_close,
+        today_bars     = None,
+        date_str       = today_str,
+        symbol         = cfg.symbol,
+        leverage       = leverage,
+        long_etf       = long_etf,
+        short_etf      = short_etf,
+        daily_vol_pct  = vol * 100,
+    )
+    log.info("[OK] Chart generated  %d bytes", len(png))
+
+    # ── 9. Email ──────────────────────────────────────────────────────────────
+    from btm.email_report import send_morning_email
+    send_morning_email(
+        chart_png    = png,
+        date_str     = today_str,
+        symbol       = cfg.symbol,
+        leverage     = leverage,
+        long_etf     = long_etf,
+        short_etf    = short_etf,
+        daily_vol_pct= vol * 100,
+    )
+    recipient = os.getenv("RECIPIENT_EMAIL", "(RECIPIENT_EMAIL not set)")
+    log.info("[OK] Email sent → %s", recipient)
+
+    log.info("=== Preflight passed — all systems go ===")
+
+
+# ---------------------------------------------------------------------------
 # Main trading-day loop
 # ---------------------------------------------------------------------------
 
@@ -518,6 +655,9 @@ def parse_args() -> argparse.Namespace:
                    help="Target daily volatility for sizing")
     p.add_argument("--dry-run", action="store_true",
                    help="Log decisions but do not submit orders")
+    p.add_argument("--preflight", action="store_true",
+                   help="Verify credentials, data, bands, and email; then exit "
+                        "(safe to run any time, never submits orders)")
     p.add_argument("--log-file", default=None,
                    help="Append logs to this file (in addition to stdout)")
     return p.parse_args()
@@ -544,6 +684,9 @@ def main() -> int:
     )
 
     try:
+        if args.preflight:
+            run_preflight(cfg)
+            return 0
         run_trading_day(cfg, dry_run=args.dry_run)
     except KeyboardInterrupt:
         log.info("Interrupted by user.")

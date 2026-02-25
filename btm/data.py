@@ -202,21 +202,36 @@ def fetch_snapshot(
     in real-time and returns the most recent 1-minute bar and the cumulative
     daily bar for the current session.
 
+    Raises RuntimeError if the market is closed and no minute_bar / daily_bar
+    is available (e.g. called pre-market on IEX feed).
+
     Returns a dict with:
-      - price:      close of the most recent 1-minute bar (current market price)
-      - vwap:       session VWAP since today's open (daily_bar.vwap)
-      - today_open: today's opening price (daily_bar.open)
-      - volume:     today's cumulative volume
-      - timestamp:  timestamp of the most recent 1-minute bar (UTC-aware)
+      - price:        close of the most recent 1-minute bar (current market price)
+      - minute_open:  open of the most recent 1-minute bar
+      - vwap:         session VWAP since today's open (daily_bar.vwap)
+      - today_open:   today's opening price (daily_bar.open)
+      - volume:       today's cumulative volume
+      - timestamp:    timestamp of the most recent 1-minute bar (UTC-aware)
     """
     snap = client.get_stock_snapshot(StockSnapshotRequest(symbol_or_symbols=symbol))
     s = snap[symbol]
+
+    if s.minute_bar is None:
+        raise RuntimeError(
+            f"Snapshot for {symbol!r} has no minute_bar — market may be closed."
+        )
+    if s.daily_bar is None:
+        raise RuntimeError(
+            f"Snapshot for {symbol!r} has no daily_bar — market may be closed."
+        )
+
     return {
-        "price":      float(s.minute_bar.close),
-        "vwap":       float(s.daily_bar.vwap),
-        "today_open": float(s.daily_bar.open),
-        "volume":     int(s.daily_bar.volume),
-        "timestamp":  s.minute_bar.timestamp,
+        "price":       float(s.minute_bar.close),
+        "minute_open": float(s.minute_bar.open),
+        "vwap":        float(s.daily_bar.vwap),
+        "today_open":  float(s.daily_bar.open),
+        "volume":      int(s.daily_bar.volume),
+        "timestamp":   s.minute_bar.timestamp,
     }
 
 
