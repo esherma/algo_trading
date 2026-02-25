@@ -56,7 +56,6 @@ from btm.core import (
     BTMConfig,
     compute_bands_for_today,
     compute_daily_vol,
-    compute_intraday_vwap,
     compute_sigma_for_today,
     decide_position,
     select_etfs,
@@ -64,7 +63,7 @@ from btm.core import (
 )
 from btm.data import (
     fetch_minute_bars,
-    fetch_latest_minute_bars,
+    fetch_snapshot,
     get_market_clock,
     is_trading_day,
     make_data_client,
@@ -174,22 +173,26 @@ class TradingState:
 
 def wait_for_open_bar(data_client, symbol: str) -> float:
     """
-    Poll until a 09:30 bar is available for *symbol*.
-    Returns the open price of that bar.
+    Poll the snapshot endpoint until today's open price is available.
+
+    The snapshot endpoint is real-time and returns daily_bar.open once the
+    first trade of the session has printed — typically within seconds of 09:30.
+    Returns today's opening price.
     """
-    log.info("Waiting for 09:30 open bar …")
-    today_str = date.today().strftime("%Y-%m-%d")
+    log.info("Waiting for market open …")
 
     for attempt in range(60):           # give it up to 5 minutes
-        bars = fetch_latest_minute_bars(data_client, symbol, f"{today_str} 09:29")
-        open_bars = bars[bars.index.strftime("%H:%M") == "09:30"]
-        if not open_bars.empty:
-            price = float(open_bars["open"].iloc[0])
-            log.info("09:30 open bar found: %s open = $%.2f", symbol, price)
-            return price
+        try:
+            snap = fetch_snapshot(data_client, symbol)
+            open_price = snap["today_open"]
+            if open_price and open_price > 0:
+                log.info("Market open: %s open = $%.2f", symbol, open_price)
+                return open_price
+        except Exception as exc:
+            log.debug("Snapshot attempt %d failed: %s", attempt + 1, exc)
         time.sleep(5)
 
-    raise RuntimeError(f"09:30 bar for {symbol} not found after 5 minutes.")
+    raise RuntimeError(f"Market open for {symbol} not detected after 5 minutes.")
 
 
 def compute_day_state(
@@ -312,27 +315,22 @@ def handle_decision(
     dry_run: bool,
 ) -> None:
     """
-    Fetch current bars, evaluate the BTM signal, and execute any order.
+    Fetch a real-time snapshot, evaluate the BTM signal, and execute any order.
+
+    Uses the Alpaca snapshot endpoint (real-time) rather than the historical
+    bars endpoint (which only reflects data up to the previous day during
+    market hours).
     """
     import pandas as pd
 
-    today_str = date.today().strftime("%Y-%m-%d")
-
-    # Fetch all bars from open until now
-    today_bars = fetch_latest_minute_bars(
-        data_client, cfg.symbol, f"{today_str} 09:30"
-    )
-
-    if today_bars.empty:
-        log.warning("No intraday bars available at %s — skipping decision.", decision_time)
+    try:
+        snap = fetch_snapshot(data_client, cfg.symbol)
+    except Exception as exc:
+        log.warning("Snapshot unavailable at %s (%s) — skipping decision.", decision_time, exc)
         return
 
-    # Current price: last close in the fetched bars
-    price = float(today_bars["close"].iloc[-1])
-
-    # VWAP up to now
-    vwap_series = compute_intraday_vwap(today_bars)
-    vwap = float(vwap_series.iloc[-1])
+    price = snap["price"]
+    vwap  = snap["vwap"]
 
     # Bands for this exact minute
     if decision_time in bands_df.index:
@@ -432,14 +430,11 @@ def run_trading_day(cfg: BTMConfig, dry_run: bool = False) -> None:
         from btm.chart import plot_morning_bands
         from btm.email_report import send_morning_email
 
-        today_bars_so_far = fetch_latest_minute_bars(
-            data_client, cfg.symbol, f"{today_str} 09:30"
-        )
         png = plot_morning_bands(
             bands_df       = bands_df,
             today_open     = state.today_open,
             yesterday_close= state.yesterday_close,
-            today_bars     = today_bars_so_far if not today_bars_so_far.empty else None,
+            today_bars     = None,   # sent at open; no bar history needed yet
             date_str       = today_str,
             symbol         = cfg.symbol,
             leverage       = state.leverage,

@@ -16,7 +16,7 @@ import pytz
 from dotenv import load_dotenv
 
 from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest, StockLatestBarRequest
+from alpaca.data.requests import StockBarsRequest, StockLatestBarRequest, StockSnapshotRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.trading.client import TradingClient
 
@@ -188,6 +188,36 @@ def fetch_latest_minute_bars(
     except RuntimeError:
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "vwap"])
     return _filter_session(df)
+
+
+def fetch_snapshot(
+    client: StockHistoricalDataClient,
+    symbol: str,
+) -> dict:
+    """
+    Fetch a real-time snapshot for *symbol* via the Alpaca snapshot endpoint.
+
+    Unlike the historical bars endpoint (which reflects only data up to the
+    previous day's close during market hours), the snapshot endpoint is served
+    in real-time and returns the most recent 1-minute bar and the cumulative
+    daily bar for the current session.
+
+    Returns a dict with:
+      - price:      close of the most recent 1-minute bar (current market price)
+      - vwap:       session VWAP since today's open (daily_bar.vwap)
+      - today_open: today's opening price (daily_bar.open)
+      - volume:     today's cumulative volume
+      - timestamp:  timestamp of the most recent 1-minute bar (UTC-aware)
+    """
+    snap = client.get_stock_snapshot(StockSnapshotRequest(symbol_or_symbols=symbol))
+    s = snap[symbol]
+    return {
+        "price":      float(s.minute_bar.close),
+        "vwap":       float(s.daily_bar.vwap),
+        "today_open": float(s.daily_bar.open),
+        "volume":     int(s.daily_bar.volume),
+        "timestamp":  s.minute_bar.timestamp,
+    }
 
 
 def get_market_clock(trading_client: TradingClient) -> dict:
