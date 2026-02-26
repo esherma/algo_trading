@@ -48,6 +48,8 @@ from typing import Optional
 
 import pytz
 from dotenv import load_dotenv
+import pandas as pd
+
 
 from btm.core import (
     CLOSE_POSITIONS_TIME,
@@ -181,8 +183,6 @@ def wait_for_open_bar(data_client, symbol: str) -> float:
     session open regardless of feed type.
     Returns today's opening price.
     """
-    import pandas as pd
-
     log.info("Waiting for 09:30 bar …")
     session_open = pd.Timestamp("09:30").time()
 
@@ -210,15 +210,13 @@ def compute_day_state(
     hist_df,
     cfg: BTMConfig,
     state: TradingState,
-) -> "pd.DataFrame":
+) -> pd.DataFrame:
     """
     Use *hist_df* (historical data ending yesterday) to compute everything
     that is fixed for the day: sigma, bands, leverage, ETF selection.
     Populates *state* in place.
     Returns the bands DataFrame indexed by "HH:MM".
     """
-    import pandas as pd
-
     # Sigma over last lookback days (historical data only — no today)
     sigma_series = compute_sigma_for_today(hist_df, cfg.lookback_days)
 
